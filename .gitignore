@@ -218,3 +218,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Allow Git to track the frontend lib directory
+!frontend/lib/
+!frontend/lib/.gitkeep
