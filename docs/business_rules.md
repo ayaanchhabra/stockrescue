@@ -10,6 +10,16 @@ All thresholds below are **defaults chosen by the team**. They live in configura
 - A product with missing sales data is **"not enough data"**. It is never labelled unpopular.
 - Importer errors must give the row number, the column, the bad value and a plain-English fix, so the user can correct the row in the preview.
 
+## Blanks when updating an existing product (CSV re-upload)
+
+- New product: a blank optional cell is stored as NULL.
+- Existing product: a blank optional cell keeps the current value. Only non-blank cells change the row.
+- Required fields can never be blank (row error).
+- Exception: `units_sold_30d`, `units_sold_60d`, `units_sold_90d` and `days_in_stock` form one
+  time-sensitive snapshot. If a row provides any of them, all four are replaced together and
+  blanks among them become NULL. If a row provides none, all four keep their current values.
+- A value can't be cleared through CSV in the MVP; edit it manually in the app.
+
 ## 2. Sales history fields
 
 Fields: `units_sold_30d`, `units_sold_60d`, `units_sold_90d`.
