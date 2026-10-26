@@ -63,15 +63,27 @@ commercial constraints, API failures, and experiment outcomes correctly.
 - The application does not claim unavailable stock can be supplied.
 - Other feasible strategies may still be considered.
 
-### T07 — Missing sales history
+### T07 — Slow-moving rules and insufficient sales data
 
-**Input:** An inventory product with unknown recent sales.
+**Input:** Inventory products representing missing sales and stock-age data,
+zero sales over 30 days, stock aged at least 90 days, positive sales with
+stock cover above 180 days, and products too new to assess against a longer
+sales window.
 
 **Expected result:**
-- Missing history remains unknown rather than becoming zero.
-- The application does not infer that the product is unpopular solely
-  because sales data is missing.
-- The dashboard indicates that its sales assessment is limited.
+- If sales data and `days_in_stock` are both missing, the dashboard shows
+  "Not enough data to assess"; missing sales are not treated as zero.
+- No recent sales is flagged when `units_sold_30d` is 0 and
+  `days_in_stock` is at least 30 or unknown.
+- Aged stock is flagged when `days_in_stock` is at least 90.
+- Low sales velocity is flagged when `units_sold_30d` is above 0 and
+  stock cover exceeds 180 days.
+- A product needs attention when at least one applicable rule fires.
+- A product too new for a sales window is not judged using that window.
+- The dashboard displays the rule and supporting values, and ranks flagged
+  products by `quantity_in_stock * unit_cost`, highest first.
+- Default thresholds are presented as configurable team choices, not
+  industry facts.
 
 ### T08 — Qloo request timeout
 
@@ -82,15 +94,30 @@ commercial constraints, API failures, and experiment outcomes correctly.
 - The application avoids exposing stack traces or secrets.
 - A failed request is not represented as a successful Qloo result.
 
-### T09 — Invalid CSV rows
+### T09 — CSV preview, import validation, and duplicate handling
 
-**Input:** A CSV containing malformed or invalid inventory rows.
+**Input:** A CSV containing valid rows, invalid rows, a repeated
+`product_id`, and an SKU that already exists for the same retailer.
+Run separate subcases for file-level errors and transaction failure.
 
 **Expected result:**
-- Validation errors identify the affected row, field, and reason.
-- Invalid data is not silently accepted.
-- The import is rejected as a whole if any row is invalid.
 - Preview does not modify persisted inventory.
+- Preview labels valid rows as `new` or `will update`.
+- Duplicate `product_id` occurrences are reported with row numbers. The
+  first valid occurrence may be imported; subsequent duplicate occurrences
+  are skipped and reported.
+- An existing SKU is updated without replacing its Product row or changing
+  its internal `Product.id`.
+- Row-level validation failures skip those rows while valid rows can import.
+- Each skipped row reports its row number, field, invalid value, readable
+  reason, and suggested correction.
+- Missing required columns, unsupported file type, files over 2 MB, or more
+  than 2,000 rows reject the whole upload.
+- Valid changes are committed in one database transaction; an induced
+  transaction failure leaves no partially imported file.
+- Optional blank-cell updates follow the final agreed rule in
+  `docs/business_rules.md`. The sales-snapshot exception remains pending
+  Person 1 and Person 2's clarification.
 
 ### T10 — Successful experiment outcome submission
 
