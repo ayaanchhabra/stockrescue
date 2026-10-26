@@ -5,7 +5,7 @@ from datetime import date, datetime, timezone
 from typing import Any
 
 from sqlalchemy import (JSON, Boolean, CheckConstraint, Date, DateTime, Float,
-                        ForeignKey, Integer, String, Text)
+                        ForeignKey, Integer, String, Text, UniqueConstraint)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.session import Base
@@ -21,6 +21,7 @@ class Product(Base):
         CheckConstraint("quantity_in_stock >= 0", name="ck_qty_nonneg"),
         CheckConstraint("unit_cost >= 0", name="ck_cost_nonneg"),
         CheckConstraint("selling_price > 0", name="ck_price_pos"),
+        UniqueConstraint("retailer_id", "sku", name="uq_retailer_sku"),
     )
     id: Mapped[int] = mapped_column(primary_key=True)
     retailer_id: Mapped[str] = mapped_column(String(64), default="demo", index=True)
