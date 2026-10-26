@@ -1,6 +1,6 @@
 # StockRescue End-to-End Test Plan
 
-**Status:** Planned — tests not yet executed
+**Status:** Partially executed — automated test baseline and health smoke test recorded; T01–T10 not yet individually executed
 
 ## 1. Purpose
 
@@ -178,3 +178,20 @@ cause test failures; dependency compatibility should be reviewed separately.
 It does not establish that the ten end-to-end scenarios in Section 2
 have passed. Those scenarios remain unverified until individually executed
 and documented with their results and evidence.
+
+## 7. Manual Health Endpoint Smoke Test
+
+**Date:** 2026-10-26
+
+**Command:** `python -m uvicorn app.main:app --reload` from `backend/`,
+followed by `curl -i http://127.0.0.1:8000/health`.
+
+**Result:** PASS — application startup completed and the health endpoint
+returned HTTP 200 OK.
+
+**Observed response:** `{"status":"ok","qloo_key_configured":false}`
+
+**Scope limitation:** This verifies local application startup and the
+health route only. It does not verify live Qloo connectivity or other API
+routes. The ten end-to-end scenarios in Section 2 remain individually
+unverified.
