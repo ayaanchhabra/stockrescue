@@ -1,7 +1,5 @@
 # StockRescue Business Rules
 
-Owner: Person 2 (decision engine). Audience: Person 4 (CSV import and dashboard) and Person 1 (database).
-
 All thresholds below are **defaults chosen by the team**. They live in configuration and can be changed. They are not industry facts.
 
 ## 1. General rules for optional fields
