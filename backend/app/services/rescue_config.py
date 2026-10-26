@@ -112,5 +112,62 @@ class RankingSettings:
             raise ValueError("max_results must be >= 1")
 
 
+# ---------------------------------------------------------------------------
+# Candidate matching and strategy generation
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class MatchSettings:
+    """How strictly a Qloo-related entity is linked to a stocked product."""
+
+    # Title similarity (0..1) at or above which two titles count as a FUZZY match.
+    fuzzy_title_threshold: float = 0.85
+
+    def __post_init__(self) -> None:
+        if not (0 < self.fuzzy_title_threshold <= 1):
+            raise ValueError("fuzzy_title_threshold must be > 0 and <= 1")
+
+
+@dataclass(frozen=True)
+class StrategySettings:
+    """Starting assumptions used when the generator sizes each strategy.
+
+    The campaign costs are PLACEHOLDERS chosen by the team, not measured costs.
+    Replace them with the shop's real figures; the plan labels them as assumptions.
+    """
+
+    test_units: int = 3                 # units the test must be able to sell
+    test_days: int = 14                 # length of the test (and of the baseline window)
+
+    bundle_discount_pct: float = 10.0   # saving vs buying the items separately
+    promo_discount_pct: float = 15.0    # target markdown (always capped by the rules)
+    min_promo_discount_pct: float = 5.0  # a smaller discount is not worth testing
+
+    max_bundle_attempts: int = 3        # partners tried before giving up on a bundle
+    max_display_titles: int = 3         # stocked titles named in a themed display
+
+    bundle_campaign_cost: float = 100.0      # Rs: sleeve, label, shelf card
+    reposition_campaign_cost: float = 150.0  # Rs: signage for the display
+    promotion_campaign_cost: float = 50.0    # Rs: price tickets
+
+    def __post_init__(self) -> None:
+        if self.test_units < 1:
+            raise ValueError("test_units must be >= 1")
+        if self.test_days < 1:
+            raise ValueError("test_days must be >= 1")
+        for name in ("bundle_discount_pct", "promo_discount_pct", "min_promo_discount_pct"):
+            if not (0 <= getattr(self, name) <= 100):
+                raise ValueError(f"{name} must be between 0 and 100")
+        if self.max_bundle_attempts < 1:
+            raise ValueError("max_bundle_attempts must be >= 1")
+        if self.max_display_titles < 1:
+            raise ValueError("max_display_titles must be >= 1")
+        for name in ("bundle_campaign_cost", "reposition_campaign_cost", "promotion_campaign_cost"):
+            if getattr(self, name) < 0:
+                raise ValueError(f"{name} must be >= 0")
+
+
 DEFAULT_CONSTRAINTS = Constraints()
 DEFAULT_RANKING_SETTINGS = RankingSettings()
+DEFAULT_MATCH_SETTINGS = MatchSettings()
+DEFAULT_STRATEGY_SETTINGS = StrategySettings()
