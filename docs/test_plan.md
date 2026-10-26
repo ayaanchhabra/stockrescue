@@ -159,3 +159,22 @@ their results recorded, critical failures addressed, and supporting
 evidence retained.
 
 The test plan itself does not establish that any scenario has passed.
+
+## 6. Automated Backend Test Baseline
+
+**Date:** 2026-10-26
+
+**Command:** `python -m pytest` (run from `backend/`)
+
+**Environment:** Python 3.14.6, pytest 9.1.1, isolated `.venv`.
+
+**Result:** 202 passed, 0 failed, 1 warning.
+
+**Warning:** Starlette reports that using `httpx` with its current
+`TestClient` is deprecated and recommends `httpx2`. The warning did not
+cause test failures; dependency compatibility should be reviewed separately.
+
+**Scope limitation:** This run covers the existing automated test suite.
+It does not establish that the ten end-to-end scenarios in Section 2
+have passed. Those scenarios remain unverified until individually executed
+and documented with their results and evidence.
