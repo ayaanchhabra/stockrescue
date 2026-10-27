@@ -45,8 +45,17 @@ class FakeQloo:
         return item
 
 
-def entity(eid, name, **props):
-    return {"entity_id": eid, "name": name, "types": ["urn:entity:book"], "properties": props}
+def entity(eid, name, ratings=None, popularity=None, year=None, **props):
+    """Shaped like a real Qloo /search result (see qloo_inspect.py output)."""
+    p = dict(props)
+    if ratings is not None:
+        p["external"] = {"goodreads": {"user_ratings_count": ratings}}
+    if year is not None:
+        p["publication_year"] = year
+    item = {"entity_id": eid, "name": name, "types": ["urn:entity:book"], "properties": p}
+    if popularity is not None:
+        item["popularity"] = popularity
+    return item
 
 
 def search_payload(*entities):

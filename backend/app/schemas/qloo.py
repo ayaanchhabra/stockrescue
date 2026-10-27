@@ -13,11 +13,18 @@ class MatchStatus(str, Enum):
 
 
 class QlooCandidate(BaseModel):
+    """One entity returned by Qloo /search (slimmed; the full response is stored as evidence)."""
     entity_id: str
     name: str
     types: list[str] = Field(default_factory=list)
-    properties: dict[str, Any] = Field(default_factory=dict)
-    internal_name_similarity: float = 0.0  # OUR string similarity, NOT a Qloo score
+    publication_year: int | None = None
+    isbn13: str | None = None
+    image_url: str | None = None
+    short_description: str | None = None
+    qloo_popularity: float | None = None          # Qloo's own field, exactly as returned
+    goodreads_ratings_count: int | None = None    # Goodreads data relayed by Qloo
+    creator_in_description: bool | None = None    # only set when a creator was supplied
+    internal_name_similarity: float = 0.0         # OUR string similarity, NOT a Qloo score
 
 
 class ResolveResult(BaseModel):
@@ -37,9 +44,12 @@ class InsightEntity(BaseModel):
     entity_id: str
     name: str
     types: list[str] = Field(default_factory=list)
-    affinity: float | None = None  # only if Qloo returned it; never invented
-    properties: dict[str, Any] = Field(default_factory=dict)
-    raw: dict[str, Any] = Field(default_factory=dict)
+    affinity: float | None = None   # Qloo's query.affinity, only if returned; never invented
+    popularity: float | None = None  # Qloo's own field
+    tags: list[dict[str, Any]] = Field(default_factory=list)  # e.g. {"id","name","type"} genre tags
+    publication_year: int | None = None
+    image_url: str | None = None
+    short_description: str | None = None
 
 
 class InsightsResult(BaseModel):
@@ -47,10 +57,11 @@ class InsightsResult(BaseModel):
     target_type: str
     endpoint: str = "/v2/insights"
     request_params: dict[str, Any]
-    entities: list[InsightEntity]  # empty list == "no useful results"
+    entities: list[InsightEntity]   # empty list == "no useful results"
+    filtered_same_title_count: int = 0  # other editions of the same book we removed
     fetched_at: str
     from_cache: bool = False
-    raw: Any = None
+    raw: Any = None                 # full Qloo response (omitted in HTTP output; see evidence endpoint)
 
 
 class MappingOut(BaseModel):
@@ -79,3 +90,15 @@ class InsightsIn(BaseModel):
 class InsightsOut(BaseModel):
     evidence_id: int
     result: InsightsResult
+
+
+class EvidenceOut(BaseModel):
+    model_config = {"from_attributes": True}
+    id: int
+    product_pk: int | None
+    kind: str
+    request_path: str
+    request_params: dict[str, Any]
+    response_json: Any
+    from_cache: bool
+    fetched_at: Any

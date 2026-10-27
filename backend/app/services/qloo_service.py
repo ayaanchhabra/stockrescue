@@ -1,9 +1,10 @@
 """Thin, defensive client for the Qloo API.
 
-Verified from public hackathon projects (NOT yet from our own key): base URL
-https://hackathon.api.qloo.com, header X-Api-Key, GET /search, GET /v2/insights
-(filter.type, signal.interests.entities, filter.exclude.entities, take).
-Run qloo_smoke_test.py with our real key to confirm response field names.
+Verified against the real API with our own key (2026-10-26): base URL
+https://hackathon.api.qloo.com, header X-Api-Key, GET /search (results[]: name, entity_id,
+types, popularity, disambiguation, tags, properties) and GET /v2/insights
+(results.entities[]: name, entity_id, type, subtype, popularity, tags, query.affinity, properties).
+Book entities have NO author field; popular titles return several same-name editions.
 """
 from __future__ import annotations
 
@@ -97,8 +98,15 @@ def _request(path: str, params: dict) -> tuple[Any, bool]:
 
 
 # ---------------- parsing helpers ----------------
+MIN_RATINGS = 1000      # a "dominant" edition must have at least this many Goodreads ratings...
+DOMINANCE_RATIO = 10    # ...and at least this many times more than the runner-up
+
+
 def _norm(s: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]", "", (s or "").lower())).strip()
+
+
+norm_title = _norm
 
 
 def _items(data: Any) -> list[dict]:
@@ -114,10 +122,14 @@ def _items(data: Any) -> list[dict]:
 
 
 def _types(item: dict) -> list[str]:
-    t = item.get("types") or item.get("type") or []
-    if isinstance(t, str):
-        return [t]
-    return [str(x) for x in t] if isinstance(t, list) else []
+    t = item.get("types")
+    if isinstance(t, list) and t:
+        return [str(x) for x in t]
+    for key in ("subtype", "type"):   # /v2/insights uses type="urn:entity", subtype="urn:entity:book"
+        v = item.get(key)
+        if isinstance(v, str) and v:
+            return [v]
+    return []
 
 
 def _props(item: dict) -> dict:
@@ -125,34 +137,88 @@ def _props(item: dict) -> dict:
     return p if isinstance(p, dict) else {}
 
 
+def _int(v: Any) -> int | None:
+    return v if isinstance(v, int) and not isinstance(v, bool) else None
+
+
+def _float(v: Any) -> float | None:
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
+def _str(v: Any) -> str | None:
+    return v if isinstance(v, str) and v else None
+
+
+def _goodreads_count(props: dict) -> int | None:
+    ext = props.get("external")
+    gr = ext.get("goodreads") if isinstance(ext, dict) else None
+    return _int(gr.get("user_ratings_count")) if isinstance(gr, dict) else None
+
+
+def _image_url(props: dict) -> str | None:
+    img = props.get("image")
+    return _str(img.get("url")) if isinstance(img, dict) else None
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _dominant(cands: list[QlooCandidate]) -> QlooCandidate | None:
+    """Among same-name editions, return one only if it is overwhelmingly the most-rated."""
+    ranked = sorted(cands, key=lambda c: c.goodreads_ratings_count or 0, reverse=True)
+    top = ranked[0]
+    top_n = top.goodreads_ratings_count or 0
+    second_n = (ranked[1].goodreads_ratings_count or 0) if len(ranked) > 1 else 0
+    if top_n >= MIN_RATINGS and top_n >= DOMINANCE_RATIO * second_n:
+        return top
+    return None
+
+
 # ---------------- public API ----------------
-def search_entities(query: str, entity_type: str = BOOK, take: int = 5) -> tuple[list[QlooCandidate], Any, dict, bool]:
+def search_entities(query: str, entity_type: str = BOOK, take: int = 5,
+                    creator: str | None = None) -> tuple[list[QlooCandidate], Any, dict, bool]:
     params = {"query": query, "types": entity_type, "take": take}
     data, cached = _request("/search", params)
+    creator_norm = _norm(creator) if creator else ""
     cands: list[QlooCandidate] = []
     for it in _items(data):
         eid = it.get("entity_id") or it.get("id")
         if not eid:
             continue
         name = str(it.get("name") or "")
+        props = _props(it)
+        in_desc = None
+        if creator_norm:
+            in_desc = creator_norm in _norm(str(props.get("description") or ""))
         cands.append(QlooCandidate(
-            entity_id=str(eid), name=name, types=_types(it), properties=_props(it),
+            entity_id=str(eid), name=name, types=_types(it),
+            publication_year=_int(props.get("publication_year")),
+            isbn13=_str(props.get("isbn13")),
+            image_url=_image_url(props),
+            short_description=_str(props.get("short_description")),
+            qloo_popularity=_float(it.get("popularity")),
+            goodreads_ratings_count=_goodreads_count(props),
+            creator_in_description=in_desc,
             internal_name_similarity=round(SequenceMatcher(None, _norm(query), _norm(name)).ratio(), 3),
         ))
-    cands.sort(key=lambda c: c.internal_name_similarity, reverse=True)
+    cands.sort(key=lambda c: c.internal_name_similarity, reverse=True)  # stable: keeps Qloo's order on ties
     return cands, data, params, cached
 
 
 def resolve(product_name: str, creator: str | None = None,
             entity_type: str = BOOK, take: int = 5) -> ResolveResult:
     """Resolve a product name to a Qloo entity: strong / ambiguous / none."""
-    cands, data, params, cached = search_entities(product_name, entity_type, take)
+    cands, data, params, cached = search_entities(product_name, entity_type, take, creator)
+    q_norm = _norm(product_name)
+    q_raw = product_name.strip().lower()
 
     def done(status: MatchStatus, chosen: QlooCandidate | None, reason: str) -> ResolveResult:
+        if chosen is not None and creator:
+            if chosen.creator_in_description is True:
+                reason += "; creator name appears in the Qloo description"
+            elif chosen.creator_in_description is False:
+                reason += "; creator name NOT found in the Qloo description, please check"
         return ResolveResult(status=status, query=product_name, chosen=chosen, candidates=cands,
                              reason=reason, request_params=params, fetched_at=_now(),
                              from_cache=cached, raw=data)
@@ -160,17 +226,34 @@ def resolve(product_name: str, creator: str | None = None,
     if not cands:
         return done(MatchStatus.NONE, None, "Qloo returned no entities for this title")
 
-    exact = [c for c in cands if c.internal_name_similarity == 1.0]
+    # 1) same title (ignoring case/punctuation)
+    exact = [c for c in cands if _norm(c.name) == q_norm]
     if len(exact) == 1:
         return done(MatchStatus.STRONG, exact[0], "Exactly one entity has the same name")
     if len(exact) > 1:
-        if creator:
-            c_norm = _norm(creator)
-            by_creator = [c for c in exact if c_norm and c_norm in _norm(json.dumps(c.properties, default=str))]
-            if len(by_creator) == 1:
-                return done(MatchStatus.STRONG, by_creator[0], "Same-name entities; creator narrowed it to one")
-        return done(MatchStatus.AMBIGUOUS, None, f"{len(exact)} entities share this name; needs human choice")
+        top = _dominant(exact)
+        if top:
+            return done(MatchStatus.STRONG, top,
+                        f"{len(exact)} entities share this name; chose the edition with far more "
+                        f"Goodreads ratings ({top.goodreads_ratings_count}); please verify")
+        return done(MatchStatus.AMBIGUOUS, None,
+                    f"{len(exact)} entities share this name and none is clearly the main edition; needs human choice")
 
+    # 2) title + subtitle, e.g. "Sapiens" -> "Sapiens: A Brief History of Humankind"
+    subtitle = [c for c in cands
+                if re.match(r"^" + re.escape(q_raw) + r"\s*[:\-\u2013\u2014(]", c.name.strip().lower())]
+    if len(subtitle) == 1:
+        return done(MatchStatus.STRONG, subtitle[0],
+                    "Title starts with the search text (subtitle/edition); please verify")
+    if len(subtitle) > 1:
+        top = _dominant(subtitle)
+        if top:
+            return done(MatchStatus.STRONG, top,
+                        f"{len(subtitle)} titles start with the search text; chose the one with far more "
+                        f"Goodreads ratings ({top.goodreads_ratings_count}); please verify")
+        return done(MatchStatus.AMBIGUOUS, None, "Several titles start with the search text; needs human choice")
+
+    # 3) very close spelling
     best = cands[0]
     second = cands[1] if len(cands) > 1 else None
     if best.internal_name_similarity >= 0.9 and (
@@ -196,11 +279,16 @@ def get_insights(entity_id: str, target_type: str = BOOK, take: int = 10,
         if not eid:
             continue
         q = it.get("query")
-        aff = q.get("affinity") if isinstance(q, dict) else None
+        props = _props(it)
+        tags = it.get("tags")
         entities.append(InsightEntity(
             entity_id=str(eid), name=str(it.get("name") or ""), types=_types(it),
-            affinity=float(aff) if isinstance(aff, (int, float)) and not isinstance(aff, bool) else None,
-            properties=_props(it), raw=it,
+            affinity=_float(q.get("affinity")) if isinstance(q, dict) else None,
+            popularity=_float(it.get("popularity")),
+            tags=[t for t in tags if isinstance(t, dict)][:12] if isinstance(tags, list) else [],
+            publication_year=_int(props.get("publication_year")),
+            image_url=_image_url(props),
+            short_description=_str(props.get("short_description")),
         ))
     return InsightsResult(source_entity_id=entity_id, target_type=target_type, request_params=params,
                           entities=entities, fetched_at=_now(), from_cache=cached, raw=data)
