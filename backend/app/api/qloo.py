@@ -5,7 +5,8 @@ from sqlalchemy.orm import Session
 
 from app.db.session import get_db
 from app.errors import NotFound
-from app.schemas.qloo import (ConfirmIn, InsightsIn, InsightsOut, MappingOut, MatchStatus)
+from app.schemas.qloo import (ConfirmIn, EvidenceOut, InsightsIn, InsightsOut, MappingOut,
+                              MatchStatus)
 from app.services import entity_resolution_service as ers
 from app.services import qloo_service
 from app.services.qloo_service import QlooError
@@ -65,4 +66,11 @@ def reject(product_pk: int, db: Session = Depends(get_db)):
 @router.post("/products/{product_pk}/qloo/insights", response_model=InsightsOut)
 def insights(product_pk: int, body: InsightsIn | None = None, db: Session = Depends(get_db)):
     evidence_id, result = ers.insights_for_product(db, product_pk, take=(body.take if body else 10))
-    return InsightsOut(evidence_id=evidence_id, result=result)
+    # The full raw response is stored as evidence; fetch it with GET /qloo/evidence/{id}
+    return InsightsOut(evidence_id=evidence_id, result=result.model_copy(update={"raw": None}))
+
+
+@router.get("/qloo/evidence/{evidence_id}", response_model=EvidenceOut)
+def evidence(evidence_id: int, db: Session = Depends(get_db)):
+    """The exact Qloo request and raw response behind a result (for the evidence panel)."""
+    return ers.get_evidence(db, evidence_id)
