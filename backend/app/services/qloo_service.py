@@ -7,7 +7,7 @@ types, popularity, disambiguation, tags, properties) and GET /v2/insights
 Book entities have NO author field; popular titles return several same-name editions.
 """
 from __future__ import annotations
-
+import html
 import json
 import logging
 import re
@@ -186,7 +186,7 @@ def search_entities(query: str, entity_type: str = BOOK, take: int = 5,
         eid = it.get("entity_id") or it.get("id")
         if not eid:
             continue
-        name = str(it.get("name") or "")
+        name = html.unescape(str(it.get("name") or ""))
         props = _props(it)
         in_desc = None
         if creator_norm:
@@ -282,7 +282,7 @@ def get_insights(entity_id: str, target_type: str = BOOK, take: int = 10,
         props = _props(it)
         tags = it.get("tags")
         entities.append(InsightEntity(
-            entity_id=str(eid), name=str(it.get("name") or ""), types=_types(it),
+            entity_id=str(eid), name=html.unescape(str(it.get("name") or "")), types=_types(it),
             affinity=_float(q.get("affinity")) if isinstance(q, dict) else None,
             popularity=_float(it.get("popularity")),
             tags=[t for t in tags if isinstance(t, dict)][:12] if isinstance(tags, list) else [],

@@ -152,3 +152,8 @@ def test_insights_for_product_drops_other_editions_of_same_book(fake):
         _, result = ers.insights_for_product(db, pk, take=5)
     assert [e.name for e in result.entities] == ["Midnight's Children"]
     assert result.filtered_same_title_count == 1
+    
+def test_html_entities_in_names_are_decoded(fake):
+    fake.push("/search", FakeResponse(200, search_payload(
+        entity("H1", "Atomic Habits: Build &amp; Break"))))
+    assert qloo_service.resolve("Atomic Habits").chosen.name == "Atomic Habits: Build & Break"
