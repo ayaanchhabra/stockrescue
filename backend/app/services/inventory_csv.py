@@ -269,17 +269,6 @@ def preview_inventory_csv(content: bytes) -> InventoryCSVPreview:
             )
         values["sku"] = sku or None
 
-        first_row = first_occurrence.get(sku) if sku else None
-        if sku and first_row is None:
-            first_occurrence[sku] = row_number
-        elif sku:
-            add_issue(
-                "product_id",
-                sku,
-                f"Duplicate product_id: first occurrence is on row {first_row}. "
-                "This later row will be skipped; keep one occurrence per ID.",
-            )
-
         # Required and optional text fields.
         text_fields = (
             ("product_name", True),
@@ -450,6 +439,22 @@ def preview_inventory_csv(content: bytes) -> InventoryCSVPreview:
                     "Use YYYY-MM-DD format, for example 2026-10-26.",
                 )
                 values["publication_or_release_date"] = None
+
+        # Only a valid occurrence claims the SKU.
+        # An invalid first row must not block a later valid occurrence.
+        if sku:
+            first_row = first_occurrence.get(sku)
+
+            if first_row is not None:
+                add_issue(
+                    "product_id",
+                    sku,
+                    f"Duplicate product_id: first valid occurrence is on row "
+                    f"{first_row}. This later row will be skipped; "
+                    "keep one occurrence per ID.",
+                )
+            elif not errors:
+                first_occurrence[sku] = row_number
 
         row = InventoryCSVRow(
             row_number=row_number,
