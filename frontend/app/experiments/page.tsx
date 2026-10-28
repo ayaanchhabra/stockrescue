@@ -4,6 +4,8 @@ import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { experimentAction, listExperiments } from "@/lib/api";
 import type { Experiment, ExperimentStatus } from "@/types/experiment";
+import OutcomeForm from "@/components/OutcomeForm";
+import OutcomeView from "@/components/OutcomeView";
 
 const inr = (n: number) => `₹${n.toLocaleString("en-IN")}`;
 
@@ -112,11 +114,14 @@ function ExperimentCard({ e, onChanged }: { e: Experiment; onChanged: () => void
           <button disabled={busy} onClick={() => run("cancel")} className={`${btn} border`}>
             Cancel
           </button>
-          <span className="text-xs text-gray-500">Recording the outcome comes next.</span>
+          <span className="text-xs text-gray-500">Record the result below.</span>
         </div>
       )}
 
       {err && <p className="text-sm text-red-600">{err}</p>}
+
+      {e.status === "running" && <OutcomeForm e={e} onDone={onChanged} />}
+      {e.status === "completed" && <OutcomeView e={e} />}
     </article>
   );
 }

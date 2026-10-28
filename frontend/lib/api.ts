@@ -93,3 +93,19 @@ export async function experimentAction(
     })
   ).data;
 }
+
+import type { OutcomeIn, OutcomeOut } from "@/types/outcome";
+
+export async function recordOutcome(id: number, body: OutcomeIn) {
+  return (
+    await request<OutcomeOut>(`/experiments/${id}/outcome`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    })
+  ).data;
+}
+
+export async function getOutcome(id: number) {
+  return (await request<OutcomeOut>(`/experiments/${id}/outcome`)).data;
+}
