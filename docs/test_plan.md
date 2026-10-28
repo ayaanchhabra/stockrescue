@@ -85,6 +85,16 @@ sales window.
 - Default thresholds are presented as configurable team choices, not
   industry facts.
 
+**Automated coverage note (2026-10-28):** The inventory metrics unit
+tests and the dashboard API regression test cover the implemented rules
+for missing sales and stock-age data, zero recent sales, aged stock,
+stock cover above 180 days, products too new for the 30-day sales window,
+inventory-cost ranking, rule counts, thresholds, and supporting explanations.
+
+The dashboard API regression test passed. The full T07 end-to-end scenario
+remains unverified; this automated coverage does not establish that the
+complete application flow has passed.
+
 ### T08 — Qloo request timeout
 
 **Input:** A Qloo request that times out or fails.
@@ -209,7 +219,7 @@ routes. The ten end-to-end scenarios in Section 2 remain individually
 unverified.
 
 
-## 8. Latest Automated Backend Test Run
+## 8. Automated Backend Test Run — 2026-10-27
 
 **Date:** 2026-10-27
 
@@ -232,3 +242,55 @@ failures; dependency compatibility should be reviewed separately.
 establish that the ten end-to-end scenarios in Section 2 have passed.
 Those scenarios remain unverified until individually executed and recorded
 with their results and evidence.
+
+## 9. Latest Automated Backend Test Run — 2026-10-28
+
+**Command:** `python -m pytest` (run from `backend/`)
+
+**Environment:** Python 3.14.6, pytest 9.1.1, isolated `.venv`.
+
+**Result:** 245 passed, 0 failed, 1 warning in 0.26 seconds.
+
+**New coverage:** One dashboard API regression test verifies serialized
+results for missing sales and stock-age data, zero recent sales, aged stock,
+stock cover above 180 days, products too new for the sales window, inventory
+cost ranking, thresholds, rule counts, and supporting explanations.
+
+**Warning:** Starlette reports that using `httpx` with its current
+`TestClient` is deprecated and recommends `httpx2`. The warning did not
+cause test failures; dependency compatibility should be reviewed separately.
+
+**Scope limitation:** This run covers the automated backend test suite.
+It does not establish that all ten end-to-end scenarios in Section 2 have
+passed. Those scenarios remain unverified until individually executed and
+recorded with actual results and evidence.
+
+## 10. Integrated Backend Test Run — 2026-10-28
+
+Command: python -m pytest (run from backend/).
+
+Environment: Python 3.14.6; pytest 9.1.1.
+
+Result: 381 passed, 0 failed, 1 warning in 0.49 seconds (latest rerun; the earlier run completed in 0.57 seconds).
+
+Scope: Full backend test suite after syncing and merging the updated remote branch, including inventory tests and integrated rescue/explanation API tests.
+
+Warning: One Starlette deprecation warning related to httpx usage in starlette.testclient. It did not cause test failure.
+
+End-to-end status: The automated backend suite passed, but scenarios T01–T10 in this plan have not all been manually executed end-to-end. Do not mark those manual scenarios as passed based solely on this run.
+
+## 11. T09 API Regression Test Run — 2026-10-28
+
+Local command: python -m pytest (run from backend/).
+
+Environment: Python 3.14.6; pytest 9.1.1.
+
+Result: 382 passed, 0 failed, 1 warning in 0.94 seconds.
+
+Coverage added: The inventory import API test now verifies row-level validation error details, including row number, field, invalid value, severity, and readable message. A new duplicate-SKU API test verifies that the first row is retained, the later duplicate is skipped, and the duplicate error includes the expected row and field details.
+
+CI: GitHub Actions Backend tests run 40739195828 succeeded after commit 2860476 was pushed.
+
+Warning: One Starlette deprecation warning related to httpx usage in starlette.testclient. It did not cause test failure.
+
+T09 status: These automated API regression checks passed. The complete T09 end-to-end scenario remains unverified. The separate suggested_correction field requirement also remains pending confirmation from Person 3.

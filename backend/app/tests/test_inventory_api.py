@@ -137,6 +137,15 @@ def test_import_creates_updates_and_skips_invalid_rows(client):
     assert [row["action"] for row in data["rows"]] == [
         "updated", "created", "skipped"
     ]
+    quantity_error = next(
+        issue
+        for issue in data["rows"][2]["errors"]
+        if issue["field"] == "quantity_in_stock"
+    )
+    assert quantity_error["row_number"] == 4
+    assert quantity_error["value"] == "-2"
+    assert quantity_error["severity"] == "error"
+    assert "0 or a positive" in quantity_error["message"]
 
     with SessionLocal() as db:
         updated = db.scalar(
@@ -223,3 +232,167 @@ def test_dashboard_returns_current_inventory_metrics(client):
     assert data["thresholds"]["sales_window_days"] == 30
     assert data["thresholds"]["aged_stock_days"] == 90
     assert len(data["products_needing_attention"]) >= 1
+
+
+def test_dashboard_api_exposes_slow_moving_rules_and_supporting_values(client):
+    seed_product(
+        sku="T07-UNKNOWN",
+        product_name="Unknown History",
+        quantity_in_stock=7,
+        unit_cost=10.0,
+        units_sold_30d=None,
+        units_sold_60d=None,
+        units_sold_90d=None,
+        days_in_stock=None,
+    )
+    seed_product(
+        sku="T07-ZERO",
+        product_name="Zero Recent Sales",
+        quantity_in_stock=10,
+        unit_cost=15.0,
+        units_sold_30d=0,
+        units_sold_60d=0,
+        units_sold_90d=0,
+        days_in_stock=30,
+    )
+    seed_product(
+        sku="T07-AGED",
+        product_name="Aged Stock",
+        quantity_in_stock=5,
+        unit_cost=20.0,
+        units_sold_30d=None,
+        units_sold_60d=None,
+        units_sold_90d=None,
+        days_in_stock=90,
+    )
+    seed_product(
+        sku="T07-VELOCITY",
+        product_name="Low Sales Velocity",
+        quantity_in_stock=61,
+        unit_cost=15.0,
+        units_sold_30d=10,
+        units_sold_60d=20,
+        units_sold_90d=30,
+        days_in_stock=30,
+    )
+    seed_product(
+        sku="T07-TOO-NEW",
+        product_name="Too New for Sales Window",
+        quantity_in_stock=100,
+        unit_cost=5.0,
+        units_sold_30d=1,
+        units_sold_60d=2,
+        units_sold_90d=3,
+        days_in_stock=20,
+    )
+
+    response = client.get("/inventory/dashboard")
+    assert response.status_code == 200, response.text
+
+    data = response.json()
+
+    assert data["total_products"] == 5
+    assert data["needs_attention_count"] == 3
+    assert data["not_enough_data_count"] == 1
+    assert data["total_inventory_cost_tied_up"] == 1735.0
+    assert data["flagged_inventory_cost_tied_up"] == 1165.0
+
+    assert data["thresholds"]["sales_window_days"] == 30
+    assert data["thresholds"]["no_recent_sales_min_stock_days"] == 30
+    assert data["thresholds"]["aged_stock_days"] == 90
+    assert data["thresholds"]["low_sales_cover_days"] == 180
+
+    attention = data["products_needing_attention"]
+    by_sku = {product["sku"]: product for product in attention}
+
+    assert [product["sku"] for product in attention] == [
+        "T07-VELOCITY",
+        "T07-ZERO",
+        "T07-AGED",
+    ]
+
+    assert by_sku["T07-ZERO"]["rules_triggered"] == ["no_recent_sales"]
+    assert any(
+        "zero sales" in explanation.lower()
+        for explanation in by_sku["T07-ZERO"]["explanations"]
+    )
+
+    assert by_sku["T07-AGED"]["rules_triggered"] == ["aged_stock"]
+    assert any(
+        "90 days" in explanation
+        for explanation in by_sku["T07-AGED"]["explanations"]
+    )
+
+    velocity = by_sku["T07-VELOCITY"]
+    assert velocity["rules_triggered"] == ["low_sales_velocity"]
+    assert velocity["stock_cover_days"] == 183.0
+    assert any(
+        "183.00 days" in explanation
+        for explanation in velocity["explanations"]
+    )
+
+    insufficient = data["products_not_enough_data"]
+    assert len(insufficient) == 1
+    assert insufficient[0]["sku"] == "T07-UNKNOWN"
+    assert insufficient[0]["status"] == "not_enough_data_to_assess"
+    assert any(
+        "not enough data to assess" in explanation.lower()
+        for explanation in insufficient[0]["explanations"]
+    )
+
+    returned_skus = {
+        product["sku"]
+        for product in attention + insufficient
+    }
+    assert "T07-TOO-NEW" not in returned_skus
+
+    assert data["rule_counts"]["no_recent_sales"] == 1
+    assert data["rule_counts"]["aged_stock"] == 1
+    assert data["rule_counts"]["low_sales_velocity"] == 1
+
+
+def test_import_duplicate_sku_reports_later_row_and_keeps_first(client):
+    content = make_csv(
+        make_csv_row("SKU-DUP", product_name="First Book"),
+        make_csv_row("SKU-DUP", product_name="Duplicate Book"),
+    )
+
+    response = client.post(
+        "/inventory/import",
+        files=upload(content),
+    )
+
+    assert response.status_code == 200, response.text
+    data = response.json()
+
+    assert data["created_count"] == 1
+    assert data["updated_count"] == 0
+    assert data["skipped_count"] == 1
+    assert data["imported_count"] == 1
+    assert [row["action"] for row in data["rows"]] == [
+        "created",
+        "skipped",
+    ]
+
+    duplicate_errors = data["rows"][1]["errors"]
+    duplicate_issue = next(
+        issue
+        for issue in duplicate_errors
+        if issue["field"] == "product_id"
+    )
+
+    assert duplicate_issue["row_number"] == 3
+    assert duplicate_issue["value"] == "SKU-DUP"
+    assert "Duplicate product_id" in duplicate_issue["message"]
+    assert duplicate_issue["severity"] == "error"
+
+    with SessionLocal() as db:
+        products = db.scalars(
+            select(Product).where(
+                Product.retailer_id == "demo",
+                Product.sku == "SKU-DUP",
+            )
+        ).all()
+
+        assert len(products) == 1
+        assert products[0].product_name == "First Book"
