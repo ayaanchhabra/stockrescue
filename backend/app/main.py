@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app import models  # noqa: F401  (registers tables)
-from app.api import experiments, health, inventory, qloo
+from app.api import experiments, health, qloo , rescue , inventory
 from app.config import settings
 from app.db.session import Base, engine
 from app.errors import InvalidTransition, NeedsResolution, NotFound
@@ -26,7 +26,8 @@ async def lifespan(_: FastAPI):
 app = FastAPI(title="StockRescue API", version="0.1.0", lifespan=lifespan)
 
 app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origin_list,
-                   allow_methods=["*"], allow_headers=["*"])
+                   allow_methods=["*"], allow_headers=["*"],
+                   expose_headers=["X-Rescue-Plan-Id"])
 
 QLOO_HTTP = {"not_configured": 503, "auth": 502, "timeout": 504, "rate_limited": 429,
              "upstream": 502, "bad_response": 502}
@@ -71,3 +72,4 @@ app.include_router(health.router)
 app.include_router(qloo.router)
 app.include_router(experiments.router)
 app.include_router(inventory.router)
+app.include_router(rescue.router)

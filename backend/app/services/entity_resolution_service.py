@@ -94,8 +94,15 @@ def insights_for_product(db: Session, product_pk: int, take: int = 10,
     if not usable:
         raise NeedsResolution("No usable Qloo entity for this product: resolve it and confirm a match first")
 
-    result = qloo_service.get_insights(m.qloo_entity_id, target_type=target_type, take=take,
+    # Ask for a few extra: Qloo can return other editions of the same book, which we drop below.
+    result = qloo_service.get_insights(m.qloo_entity_id, target_type=target_type, take=take + 3,
                                        exclude_entity_ids=[m.qloo_entity_id])
+    same_title = qloo_service.norm_title(m.matched_name or "")
+    kept = [e for e in result.entities if qloo_service.norm_title(e.name) != same_title]
+    result = result.model_copy(update={
+        "entities": kept[:take],
+        "filtered_same_title_count": len(result.entities) - len(kept),
+    })
     ev = QlooEvidence(product_pk=product_pk, kind="insights", request_path=result.endpoint,
                       request_params=result.request_params, response_json=result.raw,
                       from_cache=result.from_cache)
@@ -103,3 +110,10 @@ def insights_for_product(db: Session, product_pk: int, take: int = 10,
     db.commit()
     db.refresh(ev)
     return ev.id, result
+
+
+def get_evidence(db: Session, evidence_id: int) -> QlooEvidence:
+    ev = db.get(QlooEvidence, evidence_id)
+    if not ev:
+        raise NotFound(f"Evidence {evidence_id} not found")
+    return ev
