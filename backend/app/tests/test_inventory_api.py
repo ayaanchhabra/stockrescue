@@ -137,6 +137,15 @@ def test_import_creates_updates_and_skips_invalid_rows(client):
     assert [row["action"] for row in data["rows"]] == [
         "updated", "created", "skipped"
     ]
+    quantity_error = next(
+        issue
+        for issue in data["rows"][2]["errors"]
+        if issue["field"] == "quantity_in_stock"
+    )
+    assert quantity_error["row_number"] == 4
+    assert quantity_error["value"] == "-2"
+    assert quantity_error["severity"] == "error"
+    assert "0 or a positive" in quantity_error["message"]
 
     with SessionLocal() as db:
         updated = db.scalar(
@@ -340,3 +349,50 @@ def test_dashboard_api_exposes_slow_moving_rules_and_supporting_values(client):
     assert data["rule_counts"]["no_recent_sales"] == 1
     assert data["rule_counts"]["aged_stock"] == 1
     assert data["rule_counts"]["low_sales_velocity"] == 1
+
+
+def test_import_duplicate_sku_reports_later_row_and_keeps_first(client):
+    content = make_csv(
+        make_csv_row("SKU-DUP", product_name="First Book"),
+        make_csv_row("SKU-DUP", product_name="Duplicate Book"),
+    )
+
+    response = client.post(
+        "/inventory/import",
+        files=upload(content),
+    )
+
+    assert response.status_code == 200, response.text
+    data = response.json()
+
+    assert data["created_count"] == 1
+    assert data["updated_count"] == 0
+    assert data["skipped_count"] == 1
+    assert data["imported_count"] == 1
+    assert [row["action"] for row in data["rows"]] == [
+        "created",
+        "skipped",
+    ]
+
+    duplicate_errors = data["rows"][1]["errors"]
+    duplicate_issue = next(
+        issue
+        for issue in duplicate_errors
+        if issue["field"] == "product_id"
+    )
+
+    assert duplicate_issue["row_number"] == 3
+    assert duplicate_issue["value"] == "SKU-DUP"
+    assert "Duplicate product_id" in duplicate_issue["message"]
+    assert duplicate_issue["severity"] == "error"
+
+    with SessionLocal() as db:
+        products = db.scalars(
+            select(Product).where(
+                Product.retailer_id == "demo",
+                Product.sku == "SKU-DUP",
+            )
+        ).all()
+
+        assert len(products) == 1
+        assert products[0].product_name == "First Book"
