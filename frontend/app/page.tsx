@@ -33,7 +33,10 @@ export default function Home() {
 
   return (
     <main className="mx-auto max-w-5xl p-8 space-y-8">
-      <h1 className="text-2xl font-semibold">StockRescue</h1>
+      <div className="flex items-center justify-between">
+        <h1 className="text-2xl font-semibold">StockRescue</h1>
+        <Link href="/experiments" className="text-sm underline">Experiments</Link>
+      </div>
 
       <section className="grid grid-cols-2 gap-4 md:grid-cols-4">
         {stats.map((s) => (

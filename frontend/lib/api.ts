@@ -73,3 +73,23 @@ export async function createExperiment(planId: number, rank: number) {
     )
   ).data;
 }
+
+import type { Experiment } from "@/types/experiment";
+
+export async function listExperiments() {
+  return (await request<Experiment[]>("/experiments")).data;
+}
+
+export async function experimentAction(
+  id: number,
+  action: "approve" | "reject" | "start" | "cancel",
+  body?: Record<string, unknown>
+) {
+  return (
+    await request<Experiment>(`/experiments/${id}/${action}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body ?? {}),
+    })
+  ).data;
+}
