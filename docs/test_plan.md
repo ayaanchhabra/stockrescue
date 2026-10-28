@@ -115,9 +115,21 @@ Run separate subcases for file-level errors and transaction failure.
   than 2,000 rows reject the whole upload.
 - Valid changes are committed in one database transaction; an induced
   transaction failure leaves no partially imported file.
-- Optional blank-cell updates follow the final agreed rule in
-  `docs/business_rules.md`. The sales-snapshot exception remains pending
-  Person 1 and Person 2's clarification.
+- Optional blank-cell updates follow the implemented rules documented
+  in `docs/inventory_data_contract.md` and `docs/business_rules.md`.
+- For new products, blank optional cells become `NULL`.
+- For existing products, ordinary blank optional cells preserve current
+  values, while non-blank optional cells update them.
+- If any of the four sales-snapshot fields is supplied, all four fields
+  are replaced together; blank fields within that group become `NULL`.
+  If all four are blank, the existing snapshot is preserved.
+
+**Implementation alignment note:** The current row-issue response includes
+`row_number`, `field`, `value`, `message`, and `severity`. It does not
+currently expose a separate `suggested_correction` field. Confirm with
+Person 3 whether the message satisfies the frontend requirement or whether
+the response contract needs an additional field. Do not mark T09 as passed
+until the required behavior has been verified.
 
 ### T10 — Successful experiment outcome submission
 
@@ -195,3 +207,28 @@ returned HTTP 200 OK.
 health route only. It does not verify live Qloo connectivity or other API
 routes. The ten end-to-end scenarios in Section 2 remain individually
 unverified.
+
+
+## 8. Latest Automated Backend Test Run
+
+**Date:** 2026-10-27
+
+**Command:** `python -m pytest` (run from `backend/`)
+
+**Environment:** Python 3.14.6, pytest 9.1.1, isolated `.venv`.
+
+**Result:** 244 passed, 0 failed, 1 warning in 0.25 seconds.
+
+**Coverage added since the earlier 202-test baseline:** Seven inventory
+import tests and six inventory API tests cover import behavior, updates,
+duplicate handling, transaction rollback, CSV preview/import routes, and
+dashboard responses.
+
+**Warning:** Starlette reports that using `httpx` with its current
+`TestClient` is deprecated and recommends `httpx2`. This did not cause test
+failures; dependency compatibility should be reviewed separately.
+
+**Scope limitation:** This is an automated backend test run. It does not
+establish that the ten end-to-end scenarios in Section 2 have passed.
+Those scenarios remain unverified until individually executed and recorded
+with their results and evidence.

@@ -37,3 +37,20 @@ all been verified. Do not claim otherwise.
 ## Outstanding verification
 A genuine Qloo `none` result has not yet been confirmed. Do not label any row
 as a verified no-match until Person 1's Qloo workflow confirms it.
+
+
+## CSV validation and margin warnings
+
+The sample CSV validation run reported **40 product rows, zero validation
+errors, and two margin warnings**. The warnings are intentional examples
+of products whose current gross margin is below the product-level minimum:
+
+- **Enlightenment Now (BK018):** unit cost 300, selling price 329, minimum
+  acceptable margin 20%. Gross margin is approximately 8.81%.
+- **Behave (BK019):** unit cost 490, selling price 599, minimum acceptable
+  margin 30%. Gross margin is approximately 18.20%.
+
+Gross margin is calculated as
+`(selling_price - unit_cost) / selling_price * 100`.
+These warnings are expected QA cases, not CSV parsing errors. Prices are
+assumed to be INR, as noted above.

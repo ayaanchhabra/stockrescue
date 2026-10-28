@@ -1,6 +1,6 @@
 # StockRescue Inventory Data Contract
 
-**Status:** Draft — business rules incorporated; integration details pending
+**Status:** Inventory implementation in place; final frontend response contract pending
 **Owner:** Person 4 — Data, QA and Deployment
 
 ## 1. Purpose
@@ -64,8 +64,9 @@ The contract follows the Product model in
   Product row. Do not delete and recreate it, because experiments and
   Qloo mappings reference `Product.id`.
 - If the same `product_id` appears more than once in a CSV, report the
-  duplicate row numbers. The first occurrence may be processed; later
-  duplicate occurrences must be skipped and reported as errors.
+  duplicate row numbers. The first valid occurrence claims the SKU. An
+  invalid earlier occurrence does not claim it; later occurrences after
+  the first valid occurrence are skipped and reported as errors.
 - Preview must not write to the database. It must identify each row as
   new, will update, invalid, or otherwise requiring attention.
 - Import writes valid rows and skips invalid rows in one database
@@ -210,8 +211,22 @@ Do not duplicate these conversions throughout the codebase.
 - Person 2 owns the business rules documented above.
 - Person 3's confirmation of frontend ownership, expected fields, and
   preview/import response formats is pending.
-- The final sample dataset must contain realistic bookstore inventory.
-  Qloo-verified titles remain pending Person 1's API-key verification.
+- The synthetic sample dataset and its Qloo verification limitations are
+  documented in `data/sample_inventory_notes.md`. Not every title has
+  been individually verified, and a genuine Qloo `none` result remains
+  unconfirmed.
 
-The exact endpoint paths and response schemas must be aligned with the
-frontend before the shared interface is considered final.
+### Implemented inventory routes
+
+- `POST /inventory/preview` — validates an uploaded CSV without writing
+  inventory and returns row actions, counts, errors, and warnings.
+- `POST /inventory/import` — imports valid rows and returns import counts
+  and per-row results.
+- `GET /inventory/dashboard` — returns the demo retailer's inventory
+  dashboard metrics.
+
+These routes are registered in `backend/app/main.py` and covered by
+automated API tests. Their final shared response contract remains pending
+confirmation from Person 3. Do not treat the implementation's current
+response shapes as an agreed frontend contract until that confirmation
+has been received.
