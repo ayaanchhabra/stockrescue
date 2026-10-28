@@ -264,3 +264,17 @@ cause test failures; dependency compatibility should be reviewed separately.
 It does not establish that all ten end-to-end scenarios in Section 2 have
 passed. Those scenarios remain unverified until individually executed and
 recorded with actual results and evidence.
+
+## 10. Integrated Backend Test Run — 2026-10-28
+
+Command: python -m pytest (run from backend/).
+
+Environment: Python 3.14.6; pytest 9.1.1.
+
+Result: 381 passed, 0 failed, 1 warning in 0.49 seconds (latest rerun; the earlier run completed in 0.57 seconds).
+
+Scope: Full backend test suite after syncing and merging the updated remote branch, including inventory tests and integrated rescue/explanation API tests.
+
+Warning: One Starlette deprecation warning related to httpx usage in starlette.testclient. It did not cause test failure.
+
+End-to-end status: The automated backend suite passed, but scenarios T01–T10 in this plan have not all been manually executed end-to-end. Do not mark those manual scenarios as passed based solely on this run.
