@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app import models  # noqa: F401  (registers tables)
-from app.api import experiments, health, qloo , rescue
+from app.api import experiments, health, qloo , rescue , inventory
 from app.config import settings
 from app.db.session import Base, engine
 from app.errors import InvalidTransition, NeedsResolution, NotFound
@@ -71,4 +71,5 @@ async def _unhandled(_: Request, e: Exception):
 app.include_router(health.router)
 app.include_router(qloo.router)
 app.include_router(experiments.router)
+app.include_router(inventory.router)
 app.include_router(rescue.router)
