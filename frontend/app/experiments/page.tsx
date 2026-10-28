@@ -122,6 +122,7 @@ function ExperimentCard({ e, onChanged }: { e: Experiment; onChanged: () => void
 
       {e.status === "running" && <OutcomeForm e={e} onDone={onChanged} />}
       {e.status === "completed" && <OutcomeView e={e} />}
+
     </article>
   );
 }

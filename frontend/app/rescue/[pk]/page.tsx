@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { useEffect, useRef, useState } from "react";
+import { Suspense, useEffect, useRef, useState } from "react";
 import { getRescuePlan } from "@/lib/api";
 import CreateExperimentButton from "@/components/CreateExperimentButton";
 import type { EvidenceSource, RescuePlan, Strategy } from "@/types/rescue";
@@ -87,7 +87,7 @@ function StrategyCard({ s, planId }: { s: Strategy; planId: number | null }) {
   );
 }
 
-export default function RescuePage() {
+function RescueContent() {
   const { pk } = useParams<{ pk: string }>();
   const [plan, setPlan] = useState<RescuePlan | null>(null);
   const [planId, setPlanId] = useState<number | null>(null);
@@ -147,5 +147,13 @@ export default function RescuePage() {
         </>
       )}
     </main>
+  );
+}
+
+export default function RescuePage() {
+  return (
+    <Suspense fallback={<main className="p-8">Loading…</main>}>
+      <RescueContent />
+    </Suspense>
   );
 }
