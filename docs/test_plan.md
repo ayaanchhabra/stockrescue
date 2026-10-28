@@ -278,3 +278,19 @@ Scope: Full backend test suite after syncing and merging the updated remote bran
 Warning: One Starlette deprecation warning related to httpx usage in starlette.testclient. It did not cause test failure.
 
 End-to-end status: The automated backend suite passed, but scenarios T01–T10 in this plan have not all been manually executed end-to-end. Do not mark those manual scenarios as passed based solely on this run.
+
+## 11. T09 API Regression Test Run — 2026-10-28
+
+Local command: python -m pytest (run from backend/).
+
+Environment: Python 3.14.6; pytest 9.1.1.
+
+Result: 382 passed, 0 failed, 1 warning in 0.94 seconds.
+
+Coverage added: The inventory import API test now verifies row-level validation error details, including row number, field, invalid value, severity, and readable message. A new duplicate-SKU API test verifies that the first row is retained, the later duplicate is skipped, and the duplicate error includes the expected row and field details.
+
+CI: GitHub Actions Backend tests run 40739195828 succeeded after commit 2860476 was pushed.
+
+Warning: One Starlette deprecation warning related to httpx usage in starlette.testclient. It did not cause test failure.
+
+T09 status: These automated API regression checks passed. The complete T09 end-to-end scenario remains unverified. The separate suggested_correction field requirement also remains pending confirmation from Person 3.
