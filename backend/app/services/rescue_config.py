@@ -171,3 +171,21 @@ DEFAULT_CONSTRAINTS = Constraints()
 DEFAULT_RANKING_SETTINGS = RankingSettings()
 DEFAULT_MATCH_SETTINGS = MatchSettings()
 DEFAULT_STRATEGY_SETTINGS = StrategySettings()
+
+
+# ---------------------------------------------------------------------------
+# LLM explanation guard
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class ExplanationSettings:
+    """Limits for the optional LLM explanation (app/agent/explanation.py)."""
+
+    max_chars: int = 600  # longer explanations are discarded
+
+    def __post_init__(self) -> None:
+        if self.max_chars < 1:
+            raise ValueError("max_chars must be >= 1")
+
+
+DEFAULT_EXPLANATION_SETTINGS = ExplanationSettings()
