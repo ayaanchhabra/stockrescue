@@ -64,3 +64,12 @@ export async function getRescuePlan(productPk: number, refreshQloo = false) {
   const id = headers.get("X-Rescue-Plan-Id");
   return { plan: data, planId: id ? Number(id) : null };
 }
+
+export async function createExperiment(planId: number, rank: number) {
+  return (
+    await request<{ id?: number; status?: string }>(
+      `/rescue/plans/${planId}/strategies/${rank}/experiment`,
+      { method: "POST" }
+    )
+  ).data;
+}

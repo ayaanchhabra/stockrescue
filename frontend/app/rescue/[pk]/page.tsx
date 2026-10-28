@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { getRescuePlan } from "@/lib/api";
+import CreateExperimentButton from "@/components/CreateExperimentButton";
 import type { EvidenceSource, RescuePlan, Strategy } from "@/types/rescue";
 
 const SOURCE_STYLE: Record<EvidenceSource, { label: string; cls: string }> = {
@@ -16,7 +17,7 @@ const SOURCE_STYLE: Record<EvidenceSource, { label: string; cls: string }> = {
 
 const inr = (n: number) => `₹${n.toLocaleString("en-IN")}`;
 
-function StrategyCard({ s }: { s: Strategy }) {
+function StrategyCard({ s, planId }: { s: Strategy; planId: number | null }) {
   const e = s.economics;
   return (
     <article className="space-y-4 rounded-lg border p-5">
@@ -81,6 +82,7 @@ function StrategyCard({ s }: { s: Strategy }) {
 
       <p className="text-xs text-gray-500">{s.rank_reason.explanation}</p>
       <p className="text-xs italic text-gray-500">{s.outcome_disclaimer}</p>
+      <CreateExperimentButton planId={planId} rank={s.rank} />
     </article>
   );
 }
@@ -124,7 +126,7 @@ export default function RescuePage() {
           )}
 
           <div className="space-y-5">
-            {plan.strategies.map((s) => <StrategyCard key={s.rank} s={s} />)}
+            {plan.strategies.map((s) => <StrategyCard key={s.rank} s={s} planId={planId} />)}
           </div>
 
           {plan.rejected.length > 0 && (
