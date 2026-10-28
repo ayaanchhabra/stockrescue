@@ -85,6 +85,16 @@ sales window.
 - Default thresholds are presented as configurable team choices, not
   industry facts.
 
+**Automated coverage note (2026-10-28):** The inventory metrics unit
+tests and the dashboard API regression test cover the implemented rules
+for missing sales and stock-age data, zero recent sales, aged stock,
+stock cover above 180 days, products too new for the 30-day sales window,
+inventory-cost ranking, rule counts, thresholds, and supporting explanations.
+
+The dashboard API regression test passed. The full T07 end-to-end scenario
+remains unverified; this automated coverage does not establish that the
+complete application flow has passed.
+
 ### T08 — Qloo request timeout
 
 **Input:** A Qloo request that times out or fails.
@@ -209,7 +219,7 @@ routes. The ten end-to-end scenarios in Section 2 remain individually
 unverified.
 
 
-## 8. Latest Automated Backend Test Run
+## 8. Automated Backend Test Run — 2026-10-27
 
 **Date:** 2026-10-27
 
@@ -232,3 +242,25 @@ failures; dependency compatibility should be reviewed separately.
 establish that the ten end-to-end scenarios in Section 2 have passed.
 Those scenarios remain unverified until individually executed and recorded
 with their results and evidence.
+
+## 9. Latest Automated Backend Test Run — 2026-10-28
+
+**Command:** `python -m pytest` (run from `backend/`)
+
+**Environment:** Python 3.14.6, pytest 9.1.1, isolated `.venv`.
+
+**Result:** 245 passed, 0 failed, 1 warning in 0.26 seconds.
+
+**New coverage:** One dashboard API regression test verifies serialized
+results for missing sales and stock-age data, zero recent sales, aged stock,
+stock cover above 180 days, products too new for the sales window, inventory
+cost ranking, thresholds, rule counts, and supporting explanations.
+
+**Warning:** Starlette reports that using `httpx` with its current
+`TestClient` is deprecated and recommends `httpx2`. The warning did not
+cause test failures; dependency compatibility should be reviewed separately.
+
+**Scope limitation:** This run covers the automated backend test suite.
+It does not establish that all ten end-to-end scenarios in Section 2 have
+passed. Those scenarios remain unverified until individually executed and
+recorded with actual results and evidence.
