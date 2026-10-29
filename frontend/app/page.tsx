@@ -35,7 +35,10 @@ export default function Home() {
     <main className="mx-auto max-w-5xl p-8 space-y-8">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-semibold">StockRescue</h1>
-        <Link href="/experiments" className="text-sm underline">Experiments</Link>
+        <div className="flex gap-4 text-sm">
+          <Link href="/upload" className="underline">Upload CSV</Link>
+          <Link href="/experiments" className="underline">Experiments</Link>
+        </div>
       </div>
 
       <section className="grid grid-cols-2 gap-4 md:grid-cols-4">

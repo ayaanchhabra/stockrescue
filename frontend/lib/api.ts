@@ -1,4 +1,5 @@
 import type { ImportResult } from "@/types/inventory";
+import type { PreviewResult } from "@/types/preview";
 
 const BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
@@ -42,7 +43,7 @@ function csvForm(file: File) {
 }
 
 export async function previewInventory(file: File) {
-  return (await request<ImportResult>("/inventory/preview", { method: "POST", body: csvForm(file) })).data;
+  return (await request<PreviewResult>("/inventory/preview", { method: "POST", body: csvForm(file) })).data;
 }
 
 export async function importInventory(file: File) {
