@@ -44,6 +44,7 @@ log = logging.getLogger(__name__)
 
 EVIDENCE_PREFIX = "qloo_evidence:"
 MAX_ALTERNATIVES = 5
+HUMAN_DECISIONS = ("confirmed", "rejected")  # verification_status values set by a person
 
 NOTE_REJECTED = (
     "A person rejected the Qloo match for this product, so no cultural evidence is used. "
@@ -172,8 +173,12 @@ def mapping_to_resolution(m: QlooEntityMapping) -> QlooResolution:
 class DbQlooGateway:
     """QlooGateway backed by Person 1's entity_resolution_service.
 
-    resolve() reuses a stored mapping unless refresh=True (so a person's
-    confirm/reject choice is respected and Qloo is not called again).
+    resolve() reuses a stored mapping, so Qloo is not called again. refresh=True
+    re-resolves only mappings nobody has judged (unverified or missing). A
+    mapping a person CONFIRMED or REJECTED is always kept as it is: refresh must
+    never undo a human decision (entity_resolution_service.resolve_product would
+    reset a rejected mapping to "unverified"). To change a human decision, use
+    the confirm/reject/resolve endpoints.
     Any exception rolls back the session and is re-raised; the pipeline then
     records the stage failure and marks Qloo as unavailable.
     """
@@ -193,8 +198,9 @@ class DbQlooGateway:
         pk = int(target.product.product_id)
         self._pk = pk
         try:
-            mapping = None if self.refresh else ers.get_mapping(self.db, pk)
-            if mapping is None:
+            mapping = ers.get_mapping(self.db, pk)
+            judged = mapping is not None and mapping.verification_status in HUMAN_DECISIONS
+            if mapping is None or (self.refresh and not judged):
                 mapping = ers.resolve_product(self.db, pk, force=False)
         except Exception:
             self.db.rollback()

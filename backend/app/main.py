@@ -9,7 +9,8 @@ from app import models  # noqa: F401  (registers tables)
 from app.api import experiments, health, qloo , rescue , inventory
 from app.config import settings
 from app.db.session import Base, engine
-from app.errors import InvalidTransition, NeedsResolution, NotFound
+from app.errors import (ConstraintViolation, DuplicateExperiment, InvalidTransition,
+                        NeedsResolution, NotFound)
 from app.services.experiment_calc import CalcError
 from app.services.qloo_service import QlooError
 
@@ -50,6 +51,16 @@ async def _nf(_: Request, e: NotFound):
 @app.exception_handler(InvalidTransition)
 async def _it(_: Request, e: InvalidTransition):
     return _err(409, "invalid_state", str(e))
+
+
+@app.exception_handler(ConstraintViolation)
+async def _cv(_: Request, e: ConstraintViolation):
+    return _err(422, "constraint_violation", str(e))
+
+
+@app.exception_handler(DuplicateExperiment)
+async def _dup(_: Request, e: DuplicateExperiment):
+    return _err(409, "duplicate_experiment", str(e))
 
 
 @app.exception_handler(NeedsResolution)

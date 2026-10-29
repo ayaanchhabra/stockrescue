@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.errors import NeedsResolution, NotFound
+from app.errors import InvalidTransition, NeedsResolution, NotFound
 from app.models import Product, QlooEntityMapping, QlooEvidence
 from app.schemas.qloo import InsightsResult, MatchStatus
 from app.services import qloo_service
@@ -25,10 +25,11 @@ def get_mapping(db: Session, product_pk: int) -> QlooEntityMapping | None:
 
 def resolve_product(db: Session, product_pk: int, force: bool = False) -> QlooEntityMapping:
     """Resolve a product to a Qloo entity and store the raw evidence.
-    A mapping a human already confirmed is kept unless force=True."""
+    A mapping judged by a person is final, even when force=True. The force
+    flag only refreshes mappings that remain unverified."""
     product = _product(db, product_pk)
     existing = get_mapping(db, product_pk)
-    if existing and existing.verification_status == "confirmed" and not force:
+    if existing and existing.verification_status in ("confirmed", "rejected"):
         return existing
 
     result = qloo_service.resolve(product.product_name, creator=product.creator_or_brand)
@@ -61,6 +62,12 @@ def confirm_mapping(db: Session, product_pk: int, entity_id: str) -> QlooEntityM
     m = get_mapping(db, product_pk)
     if not m:
         raise NotFound("Resolve this product first")
+    if m.verification_status in ("confirmed", "rejected"):
+        if m.verification_status == "confirmed" and m.qloo_entity_id == entity_id:
+            return m  # repeated submission of the same human decision is idempotent
+        raise InvalidTransition(
+            "A person's Qloo match decision is final; this mapping cannot be changed."
+        )
     cand = next((c for c in m.candidates if c.get("entity_id") == entity_id), None)
     if not cand:
         raise NotFound(f"Entity {entity_id} is not among the stored candidates")
@@ -78,6 +85,12 @@ def reject_mapping(db: Session, product_pk: int) -> QlooEntityMapping:
     m = get_mapping(db, product_pk)
     if not m:
         raise NotFound("Resolve this product first")
+    if m.verification_status == "rejected":
+        return m  # repeated submission of the same human decision is idempotent
+    if m.verification_status == "confirmed":
+        raise InvalidTransition(
+            "A person's Qloo match decision is final; this mapping cannot be changed."
+        )
     m.verification_status = "rejected"
     db.commit()
     db.refresh(m)

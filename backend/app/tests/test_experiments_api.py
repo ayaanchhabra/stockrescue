@@ -1,5 +1,7 @@
 from app.tests.conftest import (FakeResponse, entity, insights_payload, make_product,
                                 search_payload)
+from app.db.session import SessionLocal
+from app.models import Product
 import httpx
 
 
@@ -115,6 +117,59 @@ def test_ambiguous_blocks_insights_until_confirmed(client, fake):
     assert client.post(f"/products/{pk}/qloo/confirm", json={"entity_id": "X2"}).json()["verification_status"] == "confirmed"
     fake.push("/v2/insights", FakeResponse(200, insights_payload({"entity_id": "B1", "name": "Foundation"})))
     assert client.post(f"/products/{pk}/qloo/insights", json={}).status_code == 200
+
+
+def test_force_resolve_cannot_overwrite_a_rejected_human_decision(client, fake):
+    pk = make_product()
+    fake.push("/search", FakeResponse(200, search_payload(entity("A1", "The God of Small Things"))))
+    initial = client.post(f"/products/{pk}/qloo/resolve").json()
+    rejected = client.post(f"/products/{pk}/qloo/reject")
+    assert rejected.status_code == 200 and rejected.json()["verification_status"] == "rejected"
+
+    # No fake Qloo response is queued after the human decision. A force refresh
+    # must return the stored mapping without making another upstream call.
+    refreshed = client.post(f"/products/{pk}/qloo/resolve?force=true")
+    assert refreshed.status_code == 200, refreshed.text
+    assert refreshed.json()["verification_status"] == "rejected"
+    assert refreshed.json()["qloo_entity_id"] == initial["qloo_entity_id"]
+    assert len([call for call in fake.calls if call[0] == "/search"]) == 1
+
+
+def test_force_resolve_cannot_overwrite_a_confirmed_human_decision(client, fake):
+    pk = make_product()
+    fake.push("/search", FakeResponse(200, search_payload(entity("A1", "The God of Small Things"))))
+    initial = client.post(f"/products/{pk}/qloo/resolve").json()
+    chosen = initial["qloo_entity_id"]
+    confirmed = client.post(f"/products/{pk}/qloo/confirm", json={"entity_id": chosen})
+    assert confirmed.status_code == 200 and confirmed.json()["verification_status"] == "confirmed"
+
+    refreshed = client.post(f"/products/{pk}/qloo/resolve?force=true")
+    assert refreshed.status_code == 200, refreshed.text
+    assert refreshed.json()["verification_status"] == "confirmed"
+    assert refreshed.json()["qloo_entity_id"] == chosen
+    assert len([call for call in fake.calls if call[0] == "/search"]) == 1
+
+
+def test_qloo_human_decision_cannot_be_switched_after_confirmation_or_rejection(client, fake):
+    pk_confirmed = make_product(name="Confirmed title")
+    with SessionLocal() as db:
+        other = Product(sku="R002", product_name="Rejected title", creator_or_brand=None,
+                        quantity_in_stock=8, unit_cost=100.0, selling_price=250.0)
+        db.add(other)
+        db.commit()
+        pk_rejected = other.id
+    fake.push("/search", FakeResponse(200, search_payload(entity("C1", "Confirmed title"))))
+    fake.push("/search", FakeResponse(200, search_payload(entity("R1", "Rejected title"))))
+    c = client.post(f"/products/{pk_confirmed}/qloo/resolve").json()
+    r = client.post(f"/products/{pk_rejected}/qloo/resolve").json()
+
+    assert client.post(f"/products/{pk_confirmed}/qloo/confirm", json={"entity_id": c["qloo_entity_id"]}).status_code == 200
+    assert client.post(f"/products/{pk_confirmed}/qloo/reject").status_code == 409
+    assert client.post(f"/products/{pk_rejected}/qloo/reject").status_code == 200
+    # Confirmation on the rejected map is disallowed even if that entity was a candidate.
+    assert client.post(
+        f"/products/{pk_rejected}/qloo/confirm", json={"entity_id": r["qloo_entity_id"]}
+    ).status_code == 409
 
 
 def test_no_match_is_reported_as_coverage_gap(client, fake):
