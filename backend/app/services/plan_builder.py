@@ -205,7 +205,7 @@ def _strategy(
         economics=_economics(scored),
         evidence=evidence,
         assumptions=list(draft.assumptions),
-        risks=list(draft.risks),
+        risks=[*draft.risks, *scored.result.warning_messages],
         operational_effort=draft.effort,
         test_plan=draft.test_plan,
         rank_reason=scored.to_rank_reason(),

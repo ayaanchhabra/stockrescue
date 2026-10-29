@@ -82,13 +82,17 @@ def test_case2_thin_margin_skips_the_promotion():
     assert PROMOTION not in types(plan)
     reasons = " ".join(r for o in rejected(plan, PROMOTION) for r in o.reasons)
     assert "largest discount your rules allow" in reasons
+    # The display does not change the margin, so it is still offered, with a warning.
+    assert REPOSITION in types(plan)
+    display = next(s for s in plan.strategies if s.type == REPOSITION)
+    assert any("already below your 15.00% minimum" in r for r in display.risks)
 
 
 def test_case3_partner_out_of_stock_rejects_the_bundle_but_keeps_the_display():
     empty = item("2", "Companion Essays", 0, 200, 400)
     plan = plan_for(stock=[TARGET, empty], gateway=Gateway(entities=(entity_for(empty),)))
     assert BUNDLE not in types(plan) and REPOSITION in types(plan)
-    assert any("complete unit(s) can be supplied" in r for o in rejected(plan, BUNDLE) for r in o.reasons)
+    assert any("Not enough stock to run a meaningful test" in r for o in rejected(plan, BUNDLE) for r in o.reasons)
 
 
 def test_case4_restricted_partner_rejects_the_bundle():
@@ -132,3 +136,12 @@ def test_case9_missing_sales_history_is_disclosed_not_judged():
     plan = plan_for(history=False)
     assert "Missing history is not evidence that the product is unpopular" in plan.limitations
     assert plan.strategies  # still proposes tests; it does not label the book unpopular
+
+
+def test_case10_low_stock_rejects_every_strategy_with_a_clear_reason():
+    low = item("1", "Edge Low Stock", 2, 350, 500)  # the test needs 3 units
+    plan = plan_for(target=low, stock=[low, PARTNER])
+    assert plan.strategies == []
+    reasons = " ".join(r for o in plan.rejected for r in o.reasons)
+    assert "Not enough stock to run a meaningful test" in reasons
+    assert "needs 3 complete unit(s)" in reasons
