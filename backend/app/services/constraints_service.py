@@ -12,8 +12,12 @@ Conventions
   discounted book, or one book sold in a new display.
 - proposed_price is the price a customer pays for ONE unit of the strategy.
 - Discount is measured against the sum of the items' normal selling prices.
-- The margin floor applies to every strategy (including repositioning at full
-  price): it is the retailer's "minimum acceptable margin" rule.
+- The margin floor applies to every strategy that changes the price or forms a
+  bundle (promotion, bundle). A reposition at the normal price does not change
+  the margin, so a product that is already below its floor is not blocked from
+  a display; the result carries a WARNING instead (see ConstraintResult.warnings).
+- Every strategy needs `planned_units` complete units in stock, because a test
+  that can sell fewer cannot show a measurable change.
 """
 
 from __future__ import annotations
@@ -41,6 +45,9 @@ INSUFFICIENT_STOCK = "INSUFFICIENT_STOCK"
 BELOW_MIN_MARGIN = "BELOW_MIN_MARGIN"
 DISCOUNT_TOO_HIGH = "DISCOUNT_TOO_HIGH"
 OVER_BUDGET = "OVER_BUDGET"
+
+# Warning codes (do not reject a strategy)
+MARGIN_ALREADY_BELOW_FLOOR = "MARGIN_ALREADY_BELOW_FLOOR"
 
 
 @dataclass(frozen=True)
@@ -79,10 +86,16 @@ class ConstraintResult:
     violations: Tuple[Violation, ...] = ()
     # Calculated values (empty if the candidate was too invalid to calculate).
     metrics: Dict[str, float] = field(default_factory=dict)
+    # Things the retailer should know that do NOT reject the strategy.
+    warnings: Tuple[Violation, ...] = ()
 
     @property
     def reasons(self) -> List[str]:
         return [v.message for v in self.violations]
+
+    @property
+    def warning_messages(self) -> List[str]:
+        return [w.message for w in self.warnings]
 
     @property
     def codes(self) -> List[str]:
@@ -175,8 +188,9 @@ def check_candidate(
         scarcest = min(products, key=lambda p: p.quantity)
         add(
             INSUFFICIENT_STOCK,
-            f"Only {units_available} complete unit(s) can be supplied but the test "
-            f"needs {candidate.planned_units}; '{scarcest.name}' has {scarcest.quantity} in stock.",
+            f"Not enough stock to run a meaningful test: it needs "
+            f"{candidate.planned_units} complete unit(s) but only {units_available} can be "
+            f"supplied ('{scarcest.name}' has {scarcest.quantity} in stock).",
         )
 
     # --- economics ---------------------------------------------------------
@@ -190,13 +204,28 @@ def check_candidate(
     eff_min = effective_min_margin(products, constraints)
     eff_cap = effective_max_discount(products, constraints)
 
+    warnings: List[Violation] = []
+    # A reposition at the normal price leaves every price and margin as it was,
+    # so it cannot be blamed for a margin that is already low.
+    price_unchanged = (
+        candidate.strategy_type == REPOSITION
+        and abs(candidate.proposed_price - sum(separate_prices)) <= 0.005
+    )
+    still_profitable = margin > 1e-9  # a display must not push units sold at or below cost
     if margin < eff_min - 1e-9:
-        floor_price = eco.min_price_for_margin(unit_cost, eff_min)
-        add(
-            BELOW_MIN_MARGIN,
-            f"Gross margin {margin:.2f}% is below the {eff_min:.2f}% minimum "
-            f"(price would need to be at least Rs {floor_price:.2f}).",
-        )
+        if price_unchanged and still_profitable:
+            warnings.append(Violation(
+                MARGIN_ALREADY_BELOW_FLOOR,
+                f"This product's margin ({margin:.2f}%) is already below your "
+                f"{eff_min:.2f}% minimum. The display does not change that.",
+            ))
+        else:
+            floor_price = eco.min_price_for_margin(unit_cost, eff_min)
+            add(
+                BELOW_MIN_MARGIN,
+                f"Gross margin {margin:.2f}% is below the {eff_min:.2f}% minimum "
+                f"(price would need to be at least Rs {floor_price:.2f}).",
+            )
 
     if discount > eff_cap + 1e-9:
         add(
@@ -223,4 +252,4 @@ def check_candidate(
         "effective_max_discount": eff_cap,
         "estimated_experiment_cost": candidate.estimated_experiment_cost,
     }
-    return ConstraintResult(not violations, tuple(violations), metrics)
+    return ConstraintResult(not violations, tuple(violations), metrics, tuple(warnings))
