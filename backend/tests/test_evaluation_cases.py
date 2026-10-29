@@ -132,3 +132,27 @@ def test_case9_missing_sales_history_is_disclosed_not_judged():
     plan = plan_for(history=False)
     assert "Missing history is not evidence that the product is unpopular" in plan.limitations
     assert plan.strategies  # still proposes tests; it does not label the book unpopular
+
+def test_case10_target_with_fewer_than_three_units_is_rejected():
+    """Current behavior; whether three test units are required is pending."""
+    low_stock = item("10", "Low Stock Novel", 2, 100, 200)
+    plan = plan_for(target=low_stock, stock=[low_stock, PARTNER])
+
+    assert not plan.strategies
+    assert plan.rejected
+
+
+def test_case11_below_floor_target_allows_bundle_on_combined_margin():
+    """Bundle economics use the combined margin, not the target's standalone margin."""
+    thin = item("11", "Below-Floor Novel", 24, 440, 500)
+    plan = plan_for(target=thin, stock=[thin, PARTNER])
+
+    # Promotion remains infeasible, but a bundle may pass on combined economics.
+    assert PROMOTION not in types(plan)
+    assert BUNDLE in types(plan)
+
+    bundle = next(
+        strategy for strategy in plan.strategies
+        if strategy.type == BUNDLE
+    )
+    assert bundle.economics.margin_pct >= 15
