@@ -5,9 +5,19 @@ import { getOutcome } from "@/lib/api";
 import type { Experiment } from "@/types/experiment";
 import type { OutcomeOut } from "@/types/outcome";
 
-function fmt(v: unknown): string {
+const HIDDEN = new Set(["limitations", "accounting_basis"]);
+
+function fmt(key: string, v: unknown): string {
   if (v === null || v === undefined) return "—";
-  if (typeof v === "object") return JSON.stringify(v);
+  if (typeof v === "object") {
+    const o = v as { available?: boolean };
+    if (o.available === false) return "Not provided";
+    return JSON.stringify(v);
+  }
+  if (typeof v === "number") {
+    if (/(revenue|cost|profit)/.test(key) && !key.includes("pct")) return `₹${v.toLocaleString("en-IN")}`;
+    if (key.includes("pct")) return `${v}%`;
+  }
   return String(v);
 }
 
@@ -35,17 +45,17 @@ export default function OutcomeView({ e }: { e: Experiment }) {
         </span>
       </div>
       <dl>
-        {Object.entries(o.calculated).map(([k, v]) => (
+        {Object.entries(o.calculated).filter(([k]) => !HIDDEN.has(k)).map(([k, v]) => (
           <div key={k} className="flex justify-between gap-4 border-b py-1 text-sm">
             <dt className="text-gray-600">{k.replace(/_/g, " ")}</dt>
-            <dd className="text-right">{fmt(v)}</dd>
+            <dd className="text-right">{fmt(k, v)}</dd>
           </div>
         ))}
       </dl>
       {o.limitations.length > 0 && (
         <ul className="list-disc pl-5 text-xs text-gray-600">
           {o.limitations.map((l, i) => (
-            <li key={i}>{fmt(l)}</li>
+            <li key={i}>{String(l)}</li>
           ))}
         </ul>
       )}
