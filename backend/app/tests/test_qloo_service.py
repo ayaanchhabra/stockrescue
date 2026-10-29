@@ -157,3 +157,16 @@ def test_html_entities_in_names_are_decoded(fake):
     fake.push("/search", FakeResponse(200, search_payload(
         entity("H1", "Atomic Habits: Build &amp; Break"))))
     assert qloo_service.resolve("Atomic Habits").chosen.name == "Atomic Habits: Build & Break"
+
+def test_loosely_related_results_count_as_no_match(fake):
+    fake.push("/search", FakeResponse(200, search_payload(
+        entity("N1", "The Boy Scout Handbook"), entity("N2", "The Official Pokémon Handbook"))))
+    r = qloo_service.resolve("Zxqv Plorbo Handbook")
+    assert r.status == MatchStatus.NONE and r.chosen is None and len(r.candidates) == 2
+
+
+def test_partial_title_stays_ambiguous_for_human_choice(fake):
+    fake.push("/search", FakeResponse(200, search_payload(
+        entity("W1", "Wuthering Heights"),
+        entity("W2", "Wuthering Heights (Norton Critical Editions)"))))
+    assert qloo_service.resolve("Wuthering").status == MatchStatus.AMBIGUOUS

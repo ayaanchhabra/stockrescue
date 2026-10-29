@@ -174,6 +174,17 @@ def _dominant(cands: list[QlooCandidate]) -> QlooCandidate | None:
         return top
     return None
 
+_STOPWORDS = {"the", "a", "an", "of", "and", "to", "in", "on", "for", "with", "by"}
+MIN_TOKEN_COVERAGE = 0.6  # best candidate must contain this share of the query's words
+
+
+def _tokens(s: str) -> set[str]:
+    return {t for t in _norm(s).split() if t not in _STOPWORDS}
+
+
+def _coverage(query: str, name: str) -> float:
+    q = _tokens(query)
+    return len(q & _tokens(name)) / len(q) if q else 0.0
 
 # ---------------- public API ----------------
 def search_entities(query: str, entity_type: str = BOOK, take: int = 5,
@@ -259,6 +270,9 @@ def resolve(product_name: str, creator: str | None = None,
     if best.internal_name_similarity >= 0.9 and (
             second is None or best.internal_name_similarity - second.internal_name_similarity >= 0.1):
         return done(MatchStatus.STRONG, best, "Very close name match (not exact); please verify")
+    if max(_coverage(product_name, c.name) for c in cands) < MIN_TOKEN_COVERAGE:
+        return done(MatchStatus.NONE, None,
+                    "Qloo returned only loosely related titles; treating as no match")
     return done(MatchStatus.AMBIGUOUS, None, "No exact name match; candidates need review")
 
 
