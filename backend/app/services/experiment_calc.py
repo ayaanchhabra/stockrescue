@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.services import economics_service as eco
+
 ACCOUNTING_BASIS = (
     "Gross profit = sum(units sold x (actual selling price - unit cost)) - additional direct campaign costs. "
     "Actual selling price is net of discounts (discounts are not subtracted twice). "
@@ -29,12 +31,19 @@ def _r(x: float | None, nd: int = 2) -> float | None:
 
 
 def _rate_change(units: float, days: float, b_units: float, b_days: float) -> tuple[float | None, float | None, float | None]:
-    """(baseline_rate, actual_rate, change_pct). change_pct is None if baseline rate is 0."""
+    """(baseline_rate, actual_rate, change_pct).
+
+    change_pct comes from economics_service.sales_change_pct, the single rule for
+    this number: it is None when either period is shorter than MIN_COMPARABLE_DAYS
+    or the baseline rate is 0 (a misleading percentage is never shown).
+    """
     b_rate = b_units / b_days
     a_rate = units / days
-    if b_rate <= 0:
-        return b_rate, a_rate, None
-    return b_rate, a_rate, (a_rate - b_rate) / b_rate * 100
+    try:
+        change = eco.sales_change_pct(b_units, b_days, units, days, MIN_COMPARABLE_DAYS)
+    except eco.EconomicsError as e:
+        raise CalcError(str(e)) from e
+    return b_rate, a_rate, change
 
 
 def compute_outcome(
@@ -90,20 +99,29 @@ def compute_outcome(
         if baseline_units < 0 or baseline_days < 1:
             raise CalcError("baseline_units must be >= 0 and baseline_days >= 1")
         b_rate, a_rate, change = _rate_change(target_units_sold, actual_days, baseline_units, baseline_days)
+        too_short = actual_days < MIN_COMPARABLE_DAYS or baseline_days < MIN_COMPARABLE_DAYS
         expected = b_rate * actual_days
         baseline = {
             "available": True,
             "baseline_units_per_day": _r(b_rate, 4),
             "experiment_units_per_day": _r(a_rate, 4),
-            "expected_units_at_baseline_rate": _r(expected),
-            "units_above_baseline_rate": _r(target_units_sold - expected),
+            # Short periods are too noisy to compare: no derived comparison is shown.
+            "expected_units_at_baseline_rate": None if too_short else _r(expected),
+            "units_above_baseline_rate": None if too_short else _r(target_units_sold - expected),
             "sales_change_pct": _r(change),
         }
-        if change is None:
+        if too_short:
+            baseline["note"] = (
+                f"A period is shorter than {MIN_COMPARABLE_DAYS} days, so no percentage change "
+                "or comparison was calculated."
+            )
+            limitations.append(
+                f"One of the periods is shorter than {MIN_COMPARABLE_DAYS} days; no percentage "
+                "change was calculated because it would be misleading."
+            )
+        elif change is None:
             baseline["note"] = "Baseline sales rate is zero, so a percentage change is undefined."
             limitations.append("Baseline period had no sales; percentage change cannot be calculated.")
-        if actual_days < MIN_COMPARABLE_DAYS or baseline_days < MIN_COMPARABLE_DAYS:
-            limitations.append(f"One of the periods is shorter than {MIN_COMPARABLE_DAYS} days; results are noisy.")
         if abs(actual_days - baseline_days) > max(actual_days, baseline_days) * 0.5:
             limitations.append("Baseline and experiment periods differ a lot in length; compared per day only.")
     else:
@@ -123,7 +141,8 @@ def compute_outcome(
         if c_change is not None and baseline.get("sales_change_pct") is not None:
             control_out["difference_vs_control_pct_points"] = _r(baseline["sales_change_pct"] - c_change)
         else:
-            limitations.append("Control comparison undefined (control or target baseline rate is zero).")
+            limitations.append("Control comparison undefined (a zero baseline rate, or a period shorter than "
+                f"{MIN_COMPARABLE_DAYS} days).")
     else:
         limitations.append("No comparable product or control period provided.")
 

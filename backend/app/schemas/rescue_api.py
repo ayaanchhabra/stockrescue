@@ -46,7 +46,10 @@ def constraints_from(body: Optional[ConstraintsIn]) -> Constraints:
 class RescueRunIn(_In):
     constraints: Optional[ConstraintsIn] = None
     refresh_qloo: bool = Field(
-        False, description="Re-run Qloo entity resolution even if a mapping is stored."
+        False, description=(
+            "Re-run Qloo entity resolution for a stored mapping nobody has judged. "
+            "A mapping a person confirmed or rejected is never overwritten."
+        )
     )
 
 

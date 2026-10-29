@@ -5,10 +5,11 @@ from datetime import datetime, timezone
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.errors import InvalidTransition, NotFound
+from app.errors import ConstraintViolation, DuplicateExperiment, InvalidTransition, NotFound
 from app.models import ExperimentOutcome, Product, RescueExperiment, RescuePlan
 from app.schemas.experiments import (ExperimentCreate, ExperimentUpdate, OutcomeIn)
 from app.services.experiment_calc import compute_outcome
+from app.services.experiment_guard import check_experiment, margin_from
 
 TRANSITIONS: dict[str, set[str]] = {
     "proposed": {"approved", "rejected"},
@@ -27,10 +28,27 @@ def get_experiment(db: Session, exp_id: int) -> RescueExperiment:
     return e
 
 
-def _move(exp: RescueExperiment, new_status: str) -> None:
+def _require_transition(exp: RescueExperiment, new_status: str) -> None:
     if new_status not in TRANSITIONS[exp.status]:
         raise InvalidTransition(f"Cannot change an experiment from '{exp.status}' to '{new_status}'")
+
+
+def _move(exp: RescueExperiment, new_status: str) -> None:
+    _require_transition(exp, new_status)
     exp.status = new_status
+
+
+def _enforce_rules(db: Session, *, plan_id, product_pk, strategy_type, bundle_product_pks,
+                   proposed_price, estimated_cost):
+    """Hard constraints on the CURRENT inventory. Returns the server-side margin."""
+    result = check_experiment(
+        db, plan_id=plan_id, product_pk=product_pk, strategy_type=strategy_type,
+        bundle_product_pks=bundle_product_pks, proposed_price=proposed_price,
+        estimated_cost=estimated_cost,
+    )
+    if result is not None and not result.passed:
+        raise ConstraintViolation(result.reasons)
+    return margin_from(result)
 
 
 def list_experiments(db: Session, status: str | None = None) -> list[RescueExperiment]:
@@ -45,7 +63,27 @@ def create_experiment(db: Session, data: ExperimentCreate) -> RescueExperiment:
         raise NotFound(f"Product {data.product_pk} not found")
     if data.plan_id is not None and not db.get(RescuePlan, data.plan_id):
         raise NotFound(f"Rescue plan {data.plan_id} not found")
-    e = RescueExperiment(**data.model_dump(), status="proposed")
+    if data.plan_id is not None:
+        twin = db.scalar(select(RescueExperiment).where(
+            RescueExperiment.plan_id == data.plan_id,
+            RescueExperiment.product_pk == data.product_pk,
+            RescueExperiment.title == data.title,
+            RescueExperiment.strategy_type == data.strategy_type,
+            RescueExperiment.status.notin_(("rejected", "cancelled")),
+        ))
+        if twin is not None:
+            raise DuplicateExperiment(
+                f"Experiment {twin.id} already exists for this strategy of this plan "
+                f"(status '{twin.status}')."
+            )
+    margin = _enforce_rules(
+        db, plan_id=data.plan_id, product_pk=data.product_pk, strategy_type=data.strategy_type,
+        bundle_product_pks=data.bundle_product_pks, proposed_price=data.proposed_price,
+        estimated_cost=data.estimated_cost,
+    )
+    values = data.model_dump()
+    values["calculated_margin_pct"] = margin  # a client-supplied margin is never stored
+    e = RescueExperiment(**values, status="proposed")
     db.add(e)
     db.commit()
     db.refresh(e)
@@ -56,8 +94,20 @@ def update_proposal(db: Session, exp_id: int, data: ExperimentUpdate) -> RescueE
     e = get_experiment(db, exp_id)
     if e.status != "proposed":
         raise InvalidTransition("Only proposed experiments can be edited")
-    for k, v in data.model_dump(exclude_unset=True).items():
+    changes = data.model_dump(exclude_unset=True)
+    changes.pop("calculated_margin_pct", None)  # always recomputed below
+    merged = {
+        "bundle_product_pks": e.bundle_product_pks, "proposed_price": e.proposed_price,
+        "estimated_cost": e.estimated_cost, **changes,
+    }
+    margin = _enforce_rules(
+        db, plan_id=e.plan_id, product_pk=e.product_pk, strategy_type=e.strategy_type,
+        bundle_product_pks=merged["bundle_product_pks"] or [],
+        proposed_price=merged["proposed_price"], estimated_cost=merged["estimated_cost"],
+    )
+    for k, v in changes.items():
         setattr(e, k, v)
+    e.calculated_margin_pct = margin
     db.commit()
     db.refresh(e)
     return e
@@ -65,6 +115,13 @@ def update_proposal(db: Session, exp_id: int, data: ExperimentUpdate) -> RescueE
 
 def approve(db: Session, exp_id: int, approved_by: str) -> RescueExperiment:
     e = get_experiment(db, exp_id)
+    _require_transition(e, "approved")
+    # Stock, prices and rules may have changed since the proposal was made.
+    e.calculated_margin_pct = _enforce_rules(
+        db, plan_id=e.plan_id, product_pk=e.product_pk, strategy_type=e.strategy_type,
+        bundle_product_pks=e.bundle_product_pks or [], proposed_price=e.proposed_price,
+        estimated_cost=e.estimated_cost,
+    )
     _move(e, "approved")
     e.approved_by = approved_by
     e.approved_at = datetime.now(timezone.utc)

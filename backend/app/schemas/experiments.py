@@ -17,7 +17,8 @@ class ExperimentCreate(BaseModel):
     bundle_product_pks: list[int] = Field(default_factory=list)
     proposed_price: float | None = Field(default=None, gt=0)
     estimated_cost: float = Field(default=0, ge=0)
-    calculated_margin_pct: float | None = None  # supplied by the economics service (Person 2)
+    calculated_margin_pct: float | None = Field(
+        default=None, description="Ignored: the server recomputes the margin from prices and costs.")
     qloo_evidence_ids: list[int] = Field(default_factory=list)
 
 
@@ -27,7 +28,8 @@ class ExperimentUpdate(BaseModel):
     bundle_product_pks: list[int] | None = None
     proposed_price: float | None = Field(default=None, gt=0)
     estimated_cost: float | None = Field(default=None, ge=0)
-    calculated_margin_pct: float | None = None
+    calculated_margin_pct: float | None = Field(
+        default=None, description="Ignored: the server recomputes the margin from prices and costs.")
 
 
 class ExperimentOut(BaseModel):

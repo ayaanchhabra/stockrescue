@@ -62,6 +62,10 @@ _QLOO_NOTES = {
         "treated as low-confidence until a person confirms the right entity."
     ),
 }
+_AMBIGUOUS_NO_EVIDENCE = (
+    "Qloo returned more than one plausible match for this product and none is confirmed, "
+    "so no cultural evidence is used until a person confirms the right entity."
+)
 
 
 # ---------------------------------------------------------------------------
@@ -276,7 +280,13 @@ def build_rescue_plan(
 
     limitations = [_BASE_LIMITATIONS]
     if status in _QLOO_NOTES:
-        limitations.append(_QLOO_NOTES[status])
+        has_qloo_evidence = any(
+            e.source == EvidenceSource.QLOO for s in strategies for e in s.evidence
+        )
+        if status == QlooStatus.AMBIGUOUS and not has_qloo_evidence:
+            limitations.append(_AMBIGUOUS_NO_EVIDENCE)  # nothing was borrowed from Qloo
+        else:
+            limitations.append(_QLOO_NOTES[status])
     if failed:
         limitations.append(
             "Incomplete analysis: these stages failed - " + ", ".join(sorted(failed)) + "."

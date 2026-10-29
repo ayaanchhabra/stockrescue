@@ -35,7 +35,7 @@ from app.agent.explanation import explain_plan
 from app.agent.llm import completer_from_env
 from app.agent.workflow import ExplainFn, RescueRequest, run_rescue
 from app.db.session import get_db
-from app.errors import NotFound
+from app.errors import ConstraintViolation, DuplicateExperiment, NotFound
 from app.schemas.experiments import ExperimentOut
 from app.schemas.rescue import Economics, RescuePlan
 from app.schemas.rescue_api import (
@@ -187,6 +187,11 @@ def create_experiment_from_strategy(plan_id: int, rank: int, db: Session = Depen
         exp = experiment_service.create_experiment(db, data)
     except NotFound as e:
         return _err(404, "not_found", str(e))
+    except ConstraintViolation as e:
+        return _err(422, "plan_outdated", "This strategy no longer passes your rules "
+                    "with the current stock and prices. " + " ".join(e.reasons))
+    except DuplicateExperiment as e:
+        return _err(409, "duplicate_experiment", str(e))
     return ExperimentOut.model_validate(exp)
 
 
