@@ -150,6 +150,14 @@ function RescueContent() {
   );
 }
 
+function RescueContent() {
+  return (
+    <Suspense fallback={<main className="p-8">Loading…</main>}>
+      <RescueContent />
+    </Suspense>
+  );
+}
+
 export default function RescuePage() {
   return (
     <Suspense fallback={<main className="p-8">Loading…</main>}>
