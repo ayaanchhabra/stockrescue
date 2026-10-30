@@ -26,6 +26,7 @@ from app.services import economics_service as eco
 from app.services.constraints_service import CandidateStrategy, check_candidate
 from app.services.matcher_service import match_candidates
 from app.services.rescue_config import DEFAULT_CONSTRAINTS, DEFAULT_STRATEGY_SETTINGS
+from app.tenant import retailer_id_for
 
 from . import adapters
 from .workflow import RescueRequest, run_rescue
@@ -105,14 +106,14 @@ def _request(db: Session, product_id: str) -> RescueRequest:
 # Tools
 # ---------------------------------------------------------------------------
 
-@_tool("get_inventory", "All products of one retailer with stock, cost and price.",
-       _schema({}, {"retailer_id": STR}))
-def get_inventory(db: Session, retailer_id: str = "demo"):
+@_tool("get_inventory", "All products belonging to the authenticated retailer with stock, cost and price.",
+       _schema({}))
+def get_inventory(db: Session):
     return [
         {"product_id": s.product.product_id, "name": s.product.name, "quantity": s.product.quantity,
          "unit_cost": s.product.unit_cost, "selling_price": s.product.selling_price,
          "creators": list(s.creators), "tags": list(s.tags), "qloo_entity_id": s.qloo_entity_id}
-        for s in adapters.load_stock(db, retailer_id)
+        for s in adapters.load_stock(db, retailer_id_for(db))
     ]
 
 

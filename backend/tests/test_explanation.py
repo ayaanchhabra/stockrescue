@@ -29,7 +29,12 @@ from app.services.rescue_config import Constraints, ExplanationSettings  # noqa:
 
 TARGET = StockItem(ProductRef("1", "Catch-22", 24, 350, 500), (), ("satire",))
 PARTNER = StockItem(ProductRef("2", "Slaughterhouse Companion", 6, 200, 400), (), ("satire",))
-ENTITY = QlooRelatedEntity("ent-7", "Slaughterhouse Companion", "book", (), ("satire",), "qloo_evidence:7")
+ENTITY = QlooRelatedEntity(
+    "ent-7", "Slaughterhouse Companion", "urn:entity:book", (), ("satire",), "qloo_evidence:7",
+    qloo_affinity=0.68, source_entity_id="ent-0", source_entity_type="urn:entity:book",
+    evidence_id=7, request_params={"signal.interests.entities": "ent-0"},
+    fetched_at="2026-10-30T06:00:00+00:00",
+)
 
 
 class Gateway:

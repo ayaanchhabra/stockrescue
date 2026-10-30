@@ -40,8 +40,22 @@ def item(pid, name, qty, cost, price, **limits):
 
 def entity_for(stock_item):
     """An exact-title Qloo link to a stocked product (illustrative)."""
-    return QlooRelatedEntity(f"ent-{stock_item.product.product_id}", stock_item.product.name,
-                             "urn:entity:book", (), (), "qloo_evidence:1")
+    # Model a complete provider response record. The RescuePlan Evidence schema
+    # requires every Qloo claim to carry its stored-response pointer, positive
+    # evidence id, source entity and original fetch metadata.
+    return QlooRelatedEntity(
+        f"ent-{stock_item.product.product_id}",
+        stock_item.product.name,
+        "urn:entity:book",
+        (),
+        (),
+        "qloo_evidence:1",
+        source_entity_id="ent-target",
+        source_entity_type="urn:entity:book",
+        evidence_id=1,
+        request_params={"signal.interests.entities": "ent-target"},
+        fetched_at="2026-10-30T06:00:00+00:00",
+    )
 
 
 TARGET = item("1", "Slow Novel", 24, 350, 500)

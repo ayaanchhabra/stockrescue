@@ -1,7 +1,7 @@
 """initial schema including idempotency records
 
 Revision ID: 27c4190e336d
-Revises: 
+Revises:
 Create Date: 2026-10-30 07:34:48.343682
 """
 from __future__ import annotations
@@ -31,6 +31,10 @@ def upgrade() -> None:
         "rescue_experiments", "experiment_outcomes",
     }
     if legacy_tables.issubset(existing):
+        product_columns = {column["name"] for column in inspector.get_columns("products")}
+        if "isbn13" not in product_columns:
+            op.add_column("products", sa.Column("isbn13", sa.String(length=13), nullable=True))
+
         experiment_columns = {column["name"] for column in inspector.get_columns("rescue_experiments")}
         if "product_snapshot" not in experiment_columns:
             op.add_column("rescue_experiments", sa.Column("product_snapshot", sa.JSON(), nullable=True))
@@ -51,6 +55,23 @@ def upgrade() -> None:
                 sa.UniqueConstraint("retailer_id", "idempotency_key", name="uq_idempotency_retailer_key"),
             )
             op.create_index("ix_idempotency_records_retailer_id", "idempotency_records", ["retailer_id"])
+        if "experiment_stock_reservations" not in existing:
+            op.create_table(
+                "experiment_stock_reservations",
+                sa.Column("id", sa.Integer(), nullable=False),
+                sa.Column("experiment_id", sa.Integer(), nullable=False),
+                sa.Column("product_pk", sa.Integer(), nullable=False),
+                sa.Column("retailer_id", sa.String(length=64), nullable=False),
+                sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+                sa.ForeignKeyConstraint(["experiment_id"], ["rescue_experiments.id"], ondelete="CASCADE"),
+                sa.ForeignKeyConstraint(["product_pk"], ["products.id"], ondelete="CASCADE"),
+                sa.PrimaryKeyConstraint("id"),
+                sa.UniqueConstraint("product_pk", name="uq_active_experiment_product_reservation"),
+                sa.UniqueConstraint("experiment_id", "product_pk", name="uq_experiment_product_reservation"),
+            )
+            op.create_index("ix_experiment_stock_reservations_experiment_id", "experiment_stock_reservations", ["experiment_id"])
+            op.create_index("ix_experiment_stock_reservations_product_pk", "experiment_stock_reservations", ["product_pk"])
+            op.create_index("ix_experiment_stock_reservations_retailer_id", "experiment_stock_reservations", ["retailer_id"])
         if "uq_plan_strategy_live" not in {idx["name"] for idx in inspector.get_indexes("rescue_experiments")}:
             op.create_index(
                 "uq_plan_strategy_live", "rescue_experiments",
@@ -88,6 +109,7 @@ def upgrade() -> None:
     sa.Column('product_name', sa.String(length=300), nullable=False),
     sa.Column('category', sa.String(length=100), nullable=False),
     sa.Column('creator_or_brand', sa.String(length=200), nullable=True),
+    sa.Column('isbn13', sa.String(length=13), nullable=True),
     sa.Column('quantity_in_stock', sa.Integer(), nullable=False),
     sa.Column('unit_cost', sa.Float(), nullable=False),
     sa.Column('selling_price', sa.Float(), nullable=False),
@@ -174,6 +196,23 @@ def upgrade() -> None:
         postgresql_where=sa.text("status NOT IN ('rejected', 'cancelled')"),
     )
 
+    op.create_table(
+        'experiment_stock_reservations',
+        sa.Column('id', sa.Integer(), nullable=False),
+        sa.Column('experiment_id', sa.Integer(), nullable=False),
+        sa.Column('product_pk', sa.Integer(), nullable=False),
+        sa.Column('retailer_id', sa.String(length=64), nullable=False),
+        sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
+        sa.ForeignKeyConstraint(['experiment_id'], ['rescue_experiments.id'], ondelete='CASCADE'),
+        sa.ForeignKeyConstraint(['product_pk'], ['products.id'], ondelete='CASCADE'),
+        sa.PrimaryKeyConstraint('id'),
+        sa.UniqueConstraint('product_pk', name='uq_active_experiment_product_reservation'),
+        sa.UniqueConstraint('experiment_id', 'product_pk', name='uq_experiment_product_reservation'),
+    )
+    op.create_index('ix_experiment_stock_reservations_experiment_id', 'experiment_stock_reservations', ['experiment_id'], unique=False)
+    op.create_index('ix_experiment_stock_reservations_product_pk', 'experiment_stock_reservations', ['product_pk'], unique=False)
+    op.create_index('ix_experiment_stock_reservations_retailer_id', 'experiment_stock_reservations', ['retailer_id'], unique=False)
+
     op.create_table('experiment_outcomes',
     sa.Column('id', sa.Integer(), nullable=False),
     sa.Column('experiment_id', sa.Integer(), nullable=False),
@@ -216,6 +255,10 @@ def downgrade() -> None:
 
     op.drop_table('qloo_entity_mappings')
     op.drop_table('experiment_outcomes')
+    op.drop_index('ix_experiment_stock_reservations_retailer_id', table_name='experiment_stock_reservations')
+    op.drop_index('ix_experiment_stock_reservations_product_pk', table_name='experiment_stock_reservations')
+    op.drop_index('ix_experiment_stock_reservations_experiment_id', table_name='experiment_stock_reservations')
+    op.drop_table('experiment_stock_reservations')
     op.drop_index('uq_plan_strategy_live', table_name='rescue_experiments')
     with op.batch_alter_table('rescue_experiments', schema=None) as batch_op:
         batch_op.drop_index(batch_op.f('ix_rescue_experiments_status'))

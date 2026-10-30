@@ -1,9 +1,18 @@
 """Test setup. These tests use MOCKED Qloo responses (isolated unit tests only).
 Nothing here is shown in the demo; the demo uses the real Qloo API."""
 import os
+import hashlib
+import json
 
 os.environ["DATABASE_URL"] = "sqlite://"      # in-memory DB
-os.environ["QLOO_API_KEY"] = "test-key"       # fake key; httpx.get is mocked below
+os.environ["QLOO_API_KEY"] = "test-key"
+# Deterministic test-only credentials; never used outside these isolated tests.
+TEST_RETAILER_TOKEN = "test-retailer-token-32-characters-minimum"
+OTHER_RETAILER_TOKEN = "other-retailer-token-32-characters-min"
+os.environ["RETAILER_API_TOKEN_HASHES"] = json.dumps({
+    hashlib.sha256(TEST_RETAILER_TOKEN.encode()).hexdigest(): "demo",
+    hashlib.sha256(OTHER_RETAILER_TOKEN.encode()).hexdigest(): "other",
+})       # fake key; httpx.get is mocked below
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
@@ -84,13 +93,19 @@ def fake(monkeypatch):
 
 @pytest.fixture
 def client():
-    with TestClient(app) as c:
+    with TestClient(app, headers={"Authorization": f"Bearer {TEST_RETAILER_TOKEN}"}) as c:
         yield c
 
 
-def make_product(name="The God of Small Things", creator="Arundhati Roy", qty=24) -> int:
+@pytest.fixture
+def other_client():
+    with TestClient(app, headers={"Authorization": f"Bearer {OTHER_RETAILER_TOKEN}"}) as c:
+        yield c
+
+
+def make_product(name="The God of Small Things", creator="Arundhati Roy", qty=24, sku="B001", retailer_id="demo") -> int:
     with SessionLocal() as db:
-        p = Product(sku="B001", product_name=name, creator_or_brand=creator,
+        p = Product(sku=sku, retailer_id=retailer_id, product_name=name, creator_or_brand=creator,
                     quantity_in_stock=qty, unit_cost=350.0, selling_price=499.0)
         db.add(p)
         db.commit()

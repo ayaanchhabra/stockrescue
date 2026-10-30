@@ -6,6 +6,8 @@ injected with dependency overrides. All data is illustrative (NOT real Qloo data
 """
 
 import json
+from dataclasses import replace
+from datetime import datetime
 
 import pytest
 
@@ -30,16 +32,35 @@ class Gateway:
     def __init__(self, entities=(), resolution=None, resolve_exc=None):
         self.entities, self.resolve_exc = entities, resolve_exc
         self.resolution = resolution or QlooResolution(QlooStatus.STRONG_MATCH, "ent-t", "Target")
-        self.evidence_ids = [41]
+        self.evidence_ids = []
         self.refresh = None
+        self.db = None
+        self.target_pk = None
 
     def resolve(self, target):
         if self.resolve_exc:
             raise self.resolve_exc
+        self.target_pk = int(target.product.product_id)
         return self.resolution
 
     def get_insights(self, resolution):
-        return self.entities
+        params = {"filter.type": "urn:entity:book", "signal.interests.entities": resolution.entity_id,
+                  "take": 10}
+        fetched_at = "2026-10-27T00:00:00+00:00"
+        entities = [replace(
+            entity, raw_ref="qloo_evidence:41", qloo_affinity=entity.affinity,
+            source_entity_id=resolution.entity_id, source_entity_type="urn:entity:book",
+            evidence_id=41, request_params=params, fetched_at=fetched_at,
+        ) for entity in self.entities]
+        raw_entities = [{"entity_id": entity.entity_id, "name": entity.name} for entity in entities]
+        self.db.add(QlooEvidence(
+            id=41, product_pk=self.target_pk, kind="insights", request_path="/v2/insights",
+            request_params=params, response_json={"results": {"entities": raw_entities}},
+            from_cache=False, fetched_at=datetime.fromisoformat(fetched_at),
+        ))
+        self.db.flush()
+        self.evidence_ids = [41]
+        return tuple(entities)
 
 
 @pytest.fixture
@@ -62,6 +83,7 @@ def make_client(db):
 
         def gateway_factory(session, refresh):
             gw.refresh = refresh
+            gw.db = session
             return gw
 
         app.dependency_overrides[get_db] = lambda: db
@@ -168,13 +190,16 @@ def test_unexpected_error_is_500_without_traceback(make_client, shop, monkeypatc
     assert "Traceback" not in r.text and "secret" not in r.text
 
 
-def test_save_failure_never_returns_an_unsaved_plan(make_client, shop, monkeypatch):
+def test_save_failure_does_not_return_an_unsaved_plan(make_client, shop, monkeypatch):
     monkeypatch.setattr(rescue.adapters, "save_plan",
                         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("db full")))
     r = make_client().post(f"/rescue/{shop['target']}")
-    assert r.status_code == 503 and rescue.PLAN_ID_HEADER not in r.headers
-    assert r.json()["error"] == "plan_persistence_failed"
-    assert "could not be saved" in r.json()["message"]
+    assert r.status_code == 500
+    assert r.json() == {
+        "error": "plan_persistence_failed",
+        "message": "The rescue plan could not be saved. No experiment can be created from this result.",
+    }
+    assert rescue.PLAN_ID_HEADER not in r.headers
 
 
 # --- POST /rescue/evaluate -------------------------------------------------
@@ -230,11 +255,7 @@ def test_unknown_plan_is_404(make_client, shop):
 
 
 def test_experiment_hand_off_creates_a_proposed_experiment(make_client, shop, db):
-    # The gateway double references this saved provider-evidence record.
-    db.add(QlooEvidence(id=41, product_pk=shop["target"], kind="insights",
-                        request_path="/v2/insights", request_params={"filter.type": "urn:entity:book"},
-                        response_json={"results": {"entities": []}}, from_cache=False))
-    db.commit()
+    # The gateway double writes the provider response and provenance itself.
     client = make_client(Gateway(entities=(shop["entity"],)))
     r = client.post(f"/rescue/{shop['target']}")
     plan = RescuePlan.model_validate(r.json())

@@ -294,3 +294,31 @@ CI: GitHub Actions Backend tests run 40739195828 succeeded after commit 2860476 
 Warning: One Starlette deprecation warning related to httpx usage in starlette.testclient. It did not cause test failure.
 
 T09 status: These automated API regression checks passed. The complete T09 end-to-end scenario remains unverified. The separate suggested_correction field requirement also remains pending confirmation from Person 3.
+
+## 12. Evaluation Regression Test Run — 2026-10-29
+
+Focused command after the latest Case 11 adjustment: `python -m pytest tests/test_evaluation_cases.py -q` (run from `backend/`).
+
+Focused result: **11 passed, 0 failed in 0.08 seconds.**
+
+Full-suite command after the latest test edits: `python -m pytest` (run from `backend/`).
+
+Full-suite result: **384 passed, 0 failed, 1 warning in 0.54 seconds.**
+
+Coverage:
+- Case 10 records the current behavior for a target with fewer than three units in stock: no feasible strategies are returned.
+- Case 11 checks that a bundle can pass when its combined margin satisfies the minimum floor, even if the target product's standalone margin is below that floor. Promotion remains rejected for the tested setup.
+
+Business-rule confirmations from Person 2:
+- The current `test_units` default is 3. This is a team default, not a permanent measured requirement.
+- A bundle is evaluated using its combined selling price and combined cost. The strictest applicable per-product margin floor and discount cap still apply.
+
+Pending integration from Person 2's `fix/margin-floor-and-stock-rule` branch:
+- A below-floor but profitable target should be eligible for normal-price display with a warning in the strategy risks.
+- Promotion remains rejected when it violates applicable constraints.
+- A target priced at or below cost should receive no strategy.
+- After the fix merges, strengthen the low-stock test to assert the stable `INSUFFICIENT_STOCK` code, not message text, and add regression coverage for the display warning.
+
+Warning on the most recent full-suite run: One Starlette deprecation warning involving `httpx` and `starlette.testclient`. It did not cause test failure.
+
+End-to-end status: These are automated backend test results. They do not establish that manual scenarios T01–T10 have all passed end-to-end.

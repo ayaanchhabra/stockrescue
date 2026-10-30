@@ -9,13 +9,14 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.errors import ConstraintViolation, DuplicateExperiment, IdempotencyConflict, InvalidTransition, NotFound
-from app.db.session import commit_or_rollback
-from app.models import (ExperimentOutcome, IdempotencyRecord, Product, QlooEvidence,
-                        RescueExperiment, RescuePlan)
+from app.errors import (ConstraintViolation, DuplicateExperiment, InvalidTransition,
+                        NotFound, StockCommitmentConflict)
+from app.models import (ExperimentOutcome, ExperimentStockReservation, IdempotencyRecord, Product,
+                        QlooEvidence, RescueExperiment, RescuePlan)
 from app.schemas.experiments import (ExperimentCreate, ExperimentUpdate, OutcomeIn)
 from app.services.experiment_calc import compute_outcome
 from app.services.experiment_guard import check_experiment, margin_from
+from app.tenant import retailer_id_for
 
 TRANSITIONS: dict[str, set[str]] = {
     "proposed": {"approved", "rejected"},
@@ -25,10 +26,16 @@ TRANSITIONS: dict[str, set[str]] = {
     "rejected": set(),
     "cancelled": set(),
 }
+ACTIVE_STATES = ("approved", "running")
 
 
 def get_experiment(db: Session, exp_id: int) -> RescueExperiment:
-    e = db.get(RescueExperiment, exp_id)
+    e = db.scalar(
+        select(RescueExperiment)
+        .join(Product, Product.id == RescueExperiment.product_pk)
+        .where(RescueExperiment.id == exp_id,
+               Product.retailer_id == retailer_id_for(db))
+    )
     if not e:
         raise NotFound(f"Experiment {exp_id} not found")
     return e
@@ -58,7 +65,10 @@ def _enforce_rules(db: Session, *, plan_id, product_pk, strategy_type, bundle_pr
 
 
 def list_experiments(db: Session, status: str | None = None) -> list[RescueExperiment]:
-    q = select(RescueExperiment).order_by(RescueExperiment.id.desc())
+    q = (select(RescueExperiment)
+         .join(Product, Product.id == RescueExperiment.product_pk)
+         .where(Product.retailer_id == retailer_id_for(db))
+         .order_by(RescueExperiment.id.desc()))
     if status:
         q = q.where(RescueExperiment.status == status)
     return list(db.scalars(q))
@@ -66,8 +76,9 @@ def list_experiments(db: Session, status: str | None = None) -> list[RescueExper
 
 def _product_snapshot(db: Session, product_pks: list[int]) -> dict:
     products = []
+    tenant = retailer_id_for(db)
     for pk in dict.fromkeys(product_pks):
-        p = db.get(Product, pk)
+        p = db.scalar(select(Product).where(Product.id == pk, Product.retailer_id == tenant))
         if p is None:
             raise NotFound(f"Product {pk} not found")
         products.append({
@@ -82,6 +93,77 @@ def _product_snapshot(db: Session, product_pks: list[int]) -> dict:
         "capture_point": "current_inventory_snapshot",
         "products": products,
     }
+
+
+def _product_ids(exp: RescueExperiment) -> set[int]:
+    return {int(exp.product_pk), *(int(pk) for pk in (exp.bundle_product_pks or []))}
+
+
+def _products_for_experiment(db: Session, exp: RescueExperiment, lock: bool = False) -> dict[int, Product]:
+    ids = sorted(_product_ids(exp))
+    stmt = (select(Product)
+            .where(Product.id.in_(ids), Product.retailer_id == retailer_id_for(db))
+            .order_by(Product.id))
+    if lock:
+        stmt = stmt.with_for_update()
+    products = {p.id: p for p in db.scalars(stmt).all()}
+    if set(products) != set(ids):
+        raise NotFound("An experiment product is missing or belongs to another retailer")
+    return products
+
+
+def _reserve_experiment_stock(db: Session, exp: RescueExperiment) -> None:
+    """Commit all experiment SKUs exclusively while approved or running.
+
+    This conservatively reserves the complete SKU for one active experiment,
+    because the current API has no per-SKU planned-unit allocation. It does not
+    decrement the physical stock count.
+    """
+    products = _products_for_experiment(db, exp, lock=True)
+    unavailable = [p.sku for p in products.values() if p.quantity_in_stock <= 0]
+    if unavailable:
+        raise StockCommitmentConflict([f"{sku} (no stock available)" for sku in unavailable])
+
+    tenant = retailer_id_for(db)
+    requested_ids = set(products)
+
+    # Legacy approved/running rows may predate reservation records.
+    active = db.scalars(
+        select(RescueExperiment)
+        .join(Product, Product.id == RescueExperiment.product_pk)
+        .where(Product.retailer_id == tenant,
+               RescueExperiment.status.in_(ACTIVE_STATES),
+               RescueExperiment.id != exp.id)
+        .with_for_update()
+    ).all()
+    conflicts: set[int] = set()
+    for other in active:
+        conflicts.update(requested_ids.intersection(_product_ids(other)))
+
+    existing_reservations = db.scalars(
+        select(ExperimentStockReservation)
+        .where(ExperimentStockReservation.product_pk.in_(requested_ids))
+        .with_for_update()
+    ).all()
+    conflicts.update(r.product_pk for r in existing_reservations if r.experiment_id != exp.id)
+    if conflicts:
+        raise StockCommitmentConflict([products[pk].sku for pk in conflicts if pk in products])
+
+    existing_for_this = {r.product_pk for r in existing_reservations if r.experiment_id == exp.id}
+    try:
+        for product_pk in sorted(requested_ids - existing_for_this):
+            db.add(ExperimentStockReservation(
+                experiment_id=exp.id, product_pk=product_pk, retailer_id=tenant,
+            ))
+        db.flush()
+    except IntegrityError as exc:
+        raise StockCommitmentConflict([products[pk].sku for pk in requested_ids]) from exc
+
+
+def _release_reservations(db: Session, experiment_id: int) -> None:
+    db.query(ExperimentStockReservation).filter(
+        ExperimentStockReservation.experiment_id == experiment_id
+    ).delete(synchronize_session=False)
 
 
 def _strategy_evidence_ids(strategy: dict) -> list[int]:
@@ -169,19 +251,25 @@ def _validate_plan_relationship(
             evidence_id = int(raw_id)
         except (TypeError, ValueError):
             raise ConstraintViolation(["The saved plan contains an invalid evidence reference."])
-        ev = db.get(QlooEvidence, evidence_id)
+        ev = db.scalar(select(QlooEvidence).where(
+            QlooEvidence.id == evidence_id, QlooEvidence.product_pk == product.id
+        ))
         if ev is None or ev.product_pk != product.id:
             raise ConstraintViolation(["The saved plan references missing or unrelated Qloo evidence."])
         all_plan_evidence.add(evidence_id)
     if not set(expected_evidence).issubset(all_plan_evidence):
         raise ConstraintViolation(["The selected strategy references evidence that is not attached to its plan."])
     for evidence_id in supplied_evidence:
-        ev = db.get(QlooEvidence, evidence_id)
+        ev = db.scalar(select(QlooEvidence).where(
+            QlooEvidence.id == evidence_id, QlooEvidence.product_pk == product.id
+        ))
         if ev is None or ev.product_pk != product.id:
             raise ConstraintViolation(["Qloo evidence must belong to the experiment target product."])
 
     for partner_pk in bundle_product_pks:
-        partner = db.get(Product, partner_pk)
+        partner = db.scalar(select(Product).where(
+            Product.id == partner_pk, Product.retailer_id == product.retailer_id
+        ))
         if partner is None:
             raise NotFound(f"Product {partner_pk} not found")
         if partner.retailer_id != product.retailer_id:
@@ -207,7 +295,9 @@ def _validate_product_relationships(
     if strategy_type != "bundle" and bundle_product_pks:
         raise ConstraintViolation(["Only bundle experiments may include partner products."])
     for partner_pk in bundle_product_pks:
-        partner = db.get(Product, partner_pk)
+        partner = db.scalar(select(Product).where(
+            Product.id == partner_pk, Product.retailer_id == product.retailer_id
+        ))
         if partner is None:
             raise NotFound(f"Product {partner_pk} not found")
         if partner.retailer_id != product.retailer_id:
@@ -223,46 +313,53 @@ def _validate_product_relationships(
     )
 
 
-def _idempotency_fingerprint(data: ExperimentCreate) -> str:
-    canonical = json.dumps(data.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
+def _idempotency_request_hash(data: ExperimentCreate) -> str:
+    canonical = json.dumps(
+        data.model_dump(mode="json"), sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def _existing_idempotent_experiment(
-    db: Session, *, retailer_id: str, key: str, request_hash: str
+def _idempotency_replay(
+    db: Session, *, tenant: str, key: str, request_hash: str
 ) -> RescueExperiment | None:
     record = db.scalar(select(IdempotencyRecord).where(
-        IdempotencyRecord.retailer_id == retailer_id,
+        IdempotencyRecord.retailer_id == tenant,
         IdempotencyRecord.idempotency_key == key,
     ))
     if record is None:
         return None
     if record.request_hash != request_hash:
-        raise IdempotencyConflict(
-            "This Idempotency-Key was already used with a different request body. "
-            "Use a new key for a new operation."
+        raise InvalidTransition(
+            "This Idempotency-Key was already used with a different request body."
         )
     if record.resource_type != "experiment" or record.resource_id is None:
-        raise IdempotencyConflict("The idempotent operation exists but has no completed resource.")
-    experiment = db.get(RescueExperiment, record.resource_id)
-    if experiment is None:
-        raise IdempotencyConflict("The resource associated with this Idempotency-Key no longer exists.")
+        raise InvalidTransition("The prior idempotent request has no completed experiment resource.")
+    experiment = get_experiment(db, record.resource_id)
     setattr(experiment, "_idempotent_replay", True)
     return experiment
 
 
 def create_experiment(
-    db: Session, data: ExperimentCreate, *, idempotency_key: str | None = None
+    db: Session, data: ExperimentCreate, idempotency_key: str | None = None
 ) -> RescueExperiment:
-    """Create one experiment atomically, optionally replayable by Idempotency-Key.
-
-    The key is scoped to the retailer derived from the target product, never a
-    caller-supplied retailer ID. The key row and experiment row commit together.
-    """
-    product = db.get(Product, data.product_pk)
+    tenant = retailer_id_for(db)
+    key = idempotency_key.strip() if idempotency_key else None
+    if key == "":
+        key = None
+    request_hash = _idempotency_request_hash(data) if key else None
+    if key:
+        replay = _idempotency_replay(db, tenant=tenant, key=key, request_hash=request_hash)
+        if replay is not None:
+            return replay
+    product = db.scalar(select(Product).where(
+        Product.id == data.product_pk, Product.retailer_id == tenant
+    ))
     if product is None:
         raise NotFound(f"Product {data.product_pk} not found")
-    plan = db.get(RescuePlan, data.plan_id) if data.plan_id is not None else None
+    plan = db.scalar(select(RescuePlan).where(
+        RescuePlan.id == data.plan_id, RescuePlan.retailer_id == tenant
+    )) if data.plan_id is not None else None
     if data.plan_id is not None and plan is None:
         raise NotFound(f"Rescue plan {data.plan_id} not found")
     _validate_product_relationships(
@@ -270,20 +367,6 @@ def create_experiment(
         bundle_product_pks=data.bundle_product_pks, qloo_evidence_ids=data.qloo_evidence_ids,
         plan=plan, title=data.title, proposed_action=data.proposed_action,
     )
-
-    request_hash = _idempotency_fingerprint(data)
-    if idempotency_key is not None and not idempotency_key.strip():
-        raise IdempotencyConflict("Idempotency-Key cannot be blank.")
-    key = idempotency_key.strip() if idempotency_key else None
-    if key:
-        if not 1 <= len(key) <= 128:
-            raise IdempotencyConflict("Idempotency-Key must contain between 1 and 128 characters.")
-        replay = _existing_idempotent_experiment(
-            db, retailer_id=product.retailer_id, key=key, request_hash=request_hash
-        )
-        if replay is not None:
-            return replay
-
     if data.plan_id is not None:
         twin = db.scalar(select(RescueExperiment).where(
             RescueExperiment.plan_id == data.plan_id,
@@ -297,47 +380,39 @@ def create_experiment(
                 f"Experiment {twin.id} already exists for this strategy of this plan "
                 f"(status '{twin.status}')."
             )
-
     margin = _enforce_rules(
         db, plan_id=data.plan_id, product_pk=data.product_pk, strategy_type=data.strategy_type,
         bundle_product_pks=data.bundle_product_pks, proposed_price=data.proposed_price,
         estimated_cost=data.estimated_cost,
     )
     values = data.model_dump()
-    values["calculated_margin_pct"] = margin
+    values["calculated_margin_pct"] = margin  # a client-supplied margin is never stored
     values["product_snapshot"] = _product_snapshot(db, [data.product_pk, *data.bundle_product_pks])
-    experiment = RescueExperiment(**values, status="proposed")
-    db.add(experiment)
-
+    e = RescueExperiment(**values, status="proposed")
+    db.add(e)
     if key:
+        # The request record and experiment commit atomically. A retry after a
+        # successful commit returns the original resource instead of creating
+        # a duplicate; the key is scoped to the authenticated retailer.
+        db.flush()
         db.add(IdempotencyRecord(
-            retailer_id=product.retailer_id,
+            retailer_id=tenant,
             idempotency_key=key,
             request_hash=request_hash,
             resource_type="experiment",
+            resource_id=e.id,
         ))
     try:
-        db.flush()
-        if key:
-            record = db.scalar(select(IdempotencyRecord).where(
-                IdempotencyRecord.retailer_id == product.retailer_id,
-                IdempotencyRecord.idempotency_key == key,
-            ))
-            record.resource_id = experiment.id
-        commit_or_rollback(db)
-        return experiment
+        db.commit()
     except IntegrityError:
         db.rollback()
         if key:
-            replay = _existing_idempotent_experiment(
-                db, retailer_id=product.retailer_id, key=key, request_hash=request_hash
-            )
+            replay = _idempotency_replay(db, tenant=tenant, key=key, request_hash=request_hash)
             if replay is not None:
                 return replay
-        raise DuplicateExperiment("A concurrent request already created this experiment.")
-    except Exception:
-        db.rollback()
         raise
+    db.refresh(e)
+    return e
 
 
 def update_proposal(db: Session, exp_id: int, data: ExperimentUpdate) -> RescueExperiment:
@@ -350,10 +425,14 @@ def update_proposal(db: Session, exp_id: int, data: ExperimentUpdate) -> RescueE
         "bundle_product_pks": e.bundle_product_pks, "proposed_price": e.proposed_price,
         "estimated_cost": e.estimated_cost, **changes,
     }
-    product = db.get(Product, e.product_pk)
+    product = db.scalar(select(Product).where(
+        Product.id == e.product_pk, Product.retailer_id == retailer_id_for(db)
+    ))
     if product is None:
         raise NotFound(f"Product {e.product_pk} not found")
-    plan = db.get(RescuePlan, e.plan_id) if e.plan_id is not None else None
+    plan = db.scalar(select(RescuePlan).where(
+        RescuePlan.id == e.plan_id, RescuePlan.retailer_id == retailer_id_for(db)
+    )) if e.plan_id is not None else None
     _validate_product_relationships(
         db, product=product, strategy_type=e.strategy_type,
         bundle_product_pks=merged["bundle_product_pks"] or [],
@@ -367,7 +446,8 @@ def update_proposal(db: Session, exp_id: int, data: ExperimentUpdate) -> RescueE
     for k, v in changes.items():
         setattr(e, k, v)
     e.calculated_margin_pct = margin
-    commit_or_rollback(db)
+    db.commit()
+    db.refresh(e)
     return e
 
 
@@ -380,24 +460,33 @@ def approve(db: Session, exp_id: int, approved_by: str) -> RescueExperiment:
         bundle_product_pks=e.bundle_product_pks or [], proposed_price=e.proposed_price,
         estimated_cost=e.estimated_cost,
     )
-    _move(e, "approved")
-    e.approved_by = approved_by
-    e.approved_at = datetime.now(timezone.utc)
-    commit_or_rollback(db)
+    # A SAVEPOINT protects the surrounding transaction if the unique
+    # reservation index detects a concurrent approval.
+    with db.begin_nested():
+        _reserve_experiment_stock(db, e)
+        _move(e, "approved")
+        e.approved_by = approved_by
+        e.approved_at = datetime.now(timezone.utc)
+        db.flush()
+    db.commit()
+    db.refresh(e)
     return e
 
 
 def reject(db: Session, exp_id: int) -> RescueExperiment:
     e = get_experiment(db, exp_id)
     _move(e, "rejected")
-    commit_or_rollback(db)
+    db.commit()
+    db.refresh(e)
     return e
 
 
 def cancel(db: Session, exp_id: int) -> RescueExperiment:
     e = get_experiment(db, exp_id)
     _move(e, "cancelled")
-    commit_or_rollback(db)
+    _release_reservations(db, e.id)
+    db.commit()
+    db.refresh(e)
     return e
 
 
@@ -410,11 +499,16 @@ def start(db: Session, exp_id: int, start_date, end_date) -> RescueExperiment:
         bundle_product_pks=e.bundle_product_pks or [], proposed_price=e.proposed_price,
         estimated_cost=e.estimated_cost,
     )
-    e.product_snapshot = _product_snapshot(db, [e.product_pk, *(e.bundle_product_pks or [])])
-    e.product_snapshot["capture_point"] = "experiment_start"
-    _move(e, "running")
-    e.start_date, e.end_date = start_date, end_date
-    commit_or_rollback(db)
+    snapshot = _product_snapshot(db, [e.product_pk, *(e.bundle_product_pks or [])])
+    snapshot["capture_point"] = "experiment_start"
+    with db.begin_nested():
+        _reserve_experiment_stock(db, e)
+        e.product_snapshot = snapshot
+        _move(e, "running")
+        e.start_date, e.end_date = start_date, end_date
+        db.flush()
+    db.commit()
+    db.refresh(e)
     return e
 
 
@@ -521,7 +615,9 @@ def record_outcome(db: Session, exp_id: int, data: OutcomeIn) -> ExperimentOutco
     )
     db.add(out)
     _move(e, "completed")
-    commit_or_rollback(db)
+    _release_reservations(db, e.id)
+    db.commit()
+    db.refresh(out)
     return out
 
 
@@ -534,15 +630,28 @@ def get_outcome(db: Session, exp_id: int) -> ExperimentOutcome:
 
 
 def impact_summary(db: Session) -> dict:
-    """Counts and totals. Real and simulated outcomes are NEVER mixed."""
-    by_status = dict(db.execute(select(RescueExperiment.status, func.count()).group_by(RescueExperiment.status)).all())
+    """Tenant-scoped counts and totals. Real and simulated outcomes stay separate."""
+    tenant = retailer_id_for(db)
+    by_status = dict(db.execute(
+        select(RescueExperiment.status, func.count())
+        .join(Product, Product.id == RescueExperiment.product_pk)
+        .where(Product.retailer_id == tenant)
+        .group_by(RescueExperiment.status)
+    ).all())
     out: dict = {
-        "plans_generated": db.scalar(select(func.count()).select_from(RescuePlan)) or 0,
+        "plans_generated": db.scalar(select(func.count()).select_from(RescuePlan).where(
+            RescuePlan.retailer_id == tenant
+        )) or 0,
         "experiments_by_status": by_status,
         "experiments_total": sum(by_status.values()),
     }
     for label, flag in (("observed", False), ("simulated", True)):
-        rows = db.scalars(select(ExperimentOutcome).where(ExperimentOutcome.is_simulated == flag)).all()
+        rows = db.scalars(
+            select(ExperimentOutcome)
+            .join(RescueExperiment, RescueExperiment.id == ExperimentOutcome.experiment_id)
+            .join(Product, Product.id == RescueExperiment.product_pk)
+            .where(Product.retailer_id == tenant, ExperimentOutcome.is_simulated == flag)
+        ).all()
         out[label] = {
             "completed_experiments": len(rows),
             "units_sold": sum(r.calculated.get("target_units_sold", 0) for r in rows),

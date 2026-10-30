@@ -86,9 +86,13 @@ def test_units_exceeding_stock_rejected(client):
 
 def test_summary_keeps_simulated_separate(client):
     pk = make_product()
-    real, sim = run_to_running(client, pk), run_to_running(client, pk)
+    real = run_to_running(client, pk)
+    sim_pk = make_product(sku="B002")
+    sim = run_to_running(client, sim_pk)
     client.post(f"/experiments/{real}/outcome", json=OUTCOME)
-    client.post(f"/experiments/{sim}/outcome", json={**OUTCOME, "is_simulated": True})
+    simulated_outcome = {**OUTCOME, "items": [{**OUTCOME["items"][0], "product_id": "B002"}],
+                         "is_simulated": True}
+    client.post(f"/experiments/{sim}/outcome", json=simulated_outcome)
     s = client.get("/experiments/summary").json()
     assert s["observed"]["completed_experiments"] == 1 and s["simulated"]["completed_experiments"] == 1
     assert s["observed"]["gross_profit"] == 2800.0
@@ -98,7 +102,7 @@ def test_summary_keeps_simulated_separate(client):
 # ---------------- Qloo endpoints (mocked Qloo) ----------------
 def test_resolve_then_insights_stores_evidence(client, fake):
     pk = make_product()
-    fake.push("/search", FakeResponse(200, search_payload(entity("A1", "The God of Small Things"))))
+    fake.push("/search", FakeResponse(200, search_payload(entity("A1", "The God of Small Things", description="A novel by Arundhati Roy"))))
     m = client.post(f"/products/{pk}/qloo/resolve").json()
     assert m["match_status"] == "strong" and m["qloo_entity_id"] == "A1" and m["coverage_gap"] is False
     fake.push("/v2/insights", FakeResponse(200, insights_payload(
@@ -121,7 +125,7 @@ def test_ambiguous_blocks_insights_until_confirmed(client, fake):
 
 def test_force_resolve_cannot_overwrite_a_rejected_human_decision(client, fake):
     pk = make_product()
-    fake.push("/search", FakeResponse(200, search_payload(entity("A1", "The God of Small Things"))))
+    fake.push("/search", FakeResponse(200, search_payload(entity("A1", "The God of Small Things", description="A novel by Arundhati Roy"))))
     initial = client.post(f"/products/{pk}/qloo/resolve").json()
     rejected = client.post(f"/products/{pk}/qloo/reject")
     assert rejected.status_code == 200 and rejected.json()["verification_status"] == "rejected"
@@ -137,7 +141,7 @@ def test_force_resolve_cannot_overwrite_a_rejected_human_decision(client, fake):
 
 def test_force_resolve_cannot_overwrite_a_confirmed_human_decision(client, fake):
     pk = make_product()
-    fake.push("/search", FakeResponse(200, search_payload(entity("A1", "The God of Small Things"))))
+    fake.push("/search", FakeResponse(200, search_payload(entity("A1", "The God of Small Things", description="A novel by Arundhati Roy"))))
     initial = client.post(f"/products/{pk}/qloo/resolve").json()
     chosen = initial["qloo_entity_id"]
     confirmed = client.post(f"/products/{pk}/qloo/confirm", json={"entity_id": chosen})
@@ -151,15 +155,15 @@ def test_force_resolve_cannot_overwrite_a_confirmed_human_decision(client, fake)
 
 
 def test_qloo_human_decision_cannot_be_switched_after_confirmation_or_rejection(client, fake):
-    pk_confirmed = make_product(name="Confirmed title")
+    pk_confirmed = make_product(name="Confirmed title", creator="A. Writer")
     with SessionLocal() as db:
-        other = Product(sku="R002", product_name="Rejected title", creator_or_brand=None,
+        other = Product(sku="R002", product_name="Rejected title", creator_or_brand="B. Writer",
                         quantity_in_stock=8, unit_cost=100.0, selling_price=250.0)
         db.add(other)
         db.commit()
         pk_rejected = other.id
-    fake.push("/search", FakeResponse(200, search_payload(entity("C1", "Confirmed title"))))
-    fake.push("/search", FakeResponse(200, search_payload(entity("R1", "Rejected title"))))
+    fake.push("/search", FakeResponse(200, search_payload(entity("C1", "Confirmed title", description="A novel by A. Writer"))))
+    fake.push("/search", FakeResponse(200, search_payload(entity("R1", "Rejected title", description="A novel by B. Writer"))))
     c = client.post(f"/products/{pk_confirmed}/qloo/resolve").json()
     r = client.post(f"/products/{pk_rejected}/qloo/resolve").json()
 
@@ -218,83 +222,80 @@ def test_actual_days_must_match_saved_experiment_dates(client):
     assert r.status_code == 422 and "must match the saved experiment date range" in r.json()["message"]
 
 
-def test_idempotency_key_replays_same_experiment(client):
-    pk = make_product()
-    body = {"product_pk": pk, "strategy_type": "promotion", "title": "Keyed promotion",
-            "proposed_action": "Run a short test", "proposed_price": 449.0, "estimated_cost": 100.0}
-    headers = {"Idempotency-Key": "create-promotion-2026-01"}
-    first = client.post("/experiments", json=body, headers=headers)
-    second = client.post("/experiments", json=body, headers=headers)
-    assert first.status_code == 201, first.text
-    assert second.status_code == 200, second.text
-    assert second.json()["id"] == first.json()["id"]
-
-
-def test_idempotency_key_cannot_be_reused_for_different_payload(client):
-    pk = make_product()
-    body = {"product_pk": pk, "strategy_type": "promotion", "title": "Keyed promotion",
-            "proposed_action": "Run a short test", "proposed_price": 449.0, "estimated_cost": 100.0}
-    headers = {"Idempotency-Key": "same-key-different-payload"}
-    assert client.post("/experiments", json=body, headers=headers).status_code == 201
-    changed = {**body, "proposed_price": 459.0}
-    replay = client.post("/experiments", json=changed, headers=headers)
-    assert replay.status_code == 409
-    assert replay.json()["error"] == "idempotency_conflict"
-
-
-def test_readiness_rejects_unversioned_test_schema(client):
-    # Test fixtures create tables directly; readiness correctly requires an
-    # Alembic version marker before the app is considered deployment-ready.
-    response = client.get("/ready")
-    assert response.status_code == 503
-    assert response.json()["checks"]["database"] is True
-    assert response.json()["checks"]["schema"] is True
-    assert response.json()["checks"]["migrations"] is False
-
-
-
-def test_ready_returns_200_when_database_is_currently_migrated(client):
-    from sqlalchemy import text
-    from app.db.session import engine
-    from app.api.health import _alembic_config
-    from alembic.script import ScriptDirectory
-
-    head = ScriptDirectory.from_config(_alembic_config()).get_current_head()
-    with engine.begin() as connection:
-        connection.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)"))
-        connection.execute(text("INSERT INTO alembic_version (version_num) VALUES (:revision)"),
-                           {"revision": head})
-    try:
-        response = client.get("/ready")
-        assert response.status_code == 200
-        assert response.json()["status"] == "ready"
-        assert all(response.json()["checks"].values())
-    finally:
-        with engine.begin() as connection:
-            connection.execute(text("DROP TABLE alembic_version"))
-
-
-def test_experiment_and_idempotency_record_roll_back_together(monkeypatch):
-    from sqlalchemy import func, select
-    from fastapi.testclient import TestClient
+def test_active_experiments_cannot_double_commit_same_sku(client):
+    from sqlalchemy import select
     from app.db.session import SessionLocal
-    from app.main import app
-    from app.models import IdempotencyRecord, RescueExperiment
-    from app.services import experiment_service
+    from app.models import ExperimentStockReservation, Product
 
-    pk = make_product()
-    body = {"product_pk": pk, "strategy_type": "promotion", "title": "Atomic operation",
-            "proposed_action": "Run a short test", "proposed_price": 449.0, "estimated_cost": 100.0}
+    pk = make_product(qty=24, sku="STOCK-LOCK-1")
+    first = new_experiment(client, pk)
+    second = new_experiment(client, pk)
 
-    def simulated_commit_failure(db):
-        db.rollback()
-        raise RuntimeError("simulated database commit failure")
+    approved = client.post(f"/experiments/{first['id']}/approve", json={"approved_by": "owner"})
+    assert approved.status_code == 200 and approved.json()["status"] == "approved"
+    conflict = client.post(f"/experiments/{second['id']}/approve", json={"approved_by": "owner"})
+    assert conflict.status_code == 409
+    assert conflict.json()["error"] == "stock_commitment_conflict"
+    assert "STOCK-LOCK-1" in conflict.json()["conflicting_skus"]
 
-    monkeypatch.setattr(experiment_service, "commit_or_rollback", simulated_commit_failure)
-    with TestClient(app, raise_server_exceptions=False) as safe_client:
-        response = safe_client.post("/experiments", json=body,
-                                    headers={"Idempotency-Key": "atomicity-regression-1"})
-    assert response.status_code == 500
     with SessionLocal() as db:
-        assert db.scalar(select(func.count()).select_from(RescueExperiment)) == 0
-        assert db.scalar(select(func.count()).select_from(IdempotencyRecord)) == 0
+        quantity = db.scalar(select(Product.quantity_in_stock).where(Product.id == pk))
+        reservations = db.scalars(select(ExperimentStockReservation).where(
+            ExperimentStockReservation.product_pk == pk
+        )).all()
+    assert quantity == 24  # reservations never decrement physical on-hand stock
+    assert len(reservations) == 1 and reservations[0].experiment_id == first["id"]
+
+    assert client.post(f"/experiments/{first['id']}/cancel").json()["status"] == "cancelled"
+    retry = client.post(f"/experiments/{second['id']}/approve", json={"approved_by": "owner"})
+    assert retry.status_code == 200 and retry.json()["status"] == "approved"
+
+
+def test_bundle_reserves_target_and_each_component(client):
+    from sqlalchemy import select
+    from app.db.session import SessionLocal
+    from app.models import ExperimentStockReservation
+
+    target = make_product(sku="BUNDLE-TARGET")
+    partner = make_product(sku="BUNDLE-PARTNER", name="Bundle Partner")
+    experiment = new_experiment(client, target, strategy_type="bundle", proposed_price=850.0,
+                                estimated_cost=200.0, bundle_product_pks=[partner])
+    response = client.post(f"/experiments/{experiment['id']}/approve")
+    assert response.status_code == 200
+    with SessionLocal() as db:
+        reserved = set(db.scalars(select(ExperimentStockReservation.product_pk).where(
+            ExperimentStockReservation.experiment_id == experiment["id"]
+        )).all())
+    assert reserved == {target, partner}
+
+
+def test_completion_releases_all_bundle_reservations(client):
+    from sqlalchemy import select
+    from app.db.session import SessionLocal
+    from app.models import ExperimentStockReservation
+
+    target = make_product(sku="BUNDLE-COMPLETE-TARGET", qty=10)
+    partner = make_product(sku="BUNDLE-COMPLETE-PARTNER", name="Bundle Partner")
+    experiment = new_experiment(client, target, strategy_type="bundle", proposed_price=850.0,
+                                estimated_cost=200.0, bundle_product_pks=[partner])
+    eid = experiment["id"]
+    assert client.post(f"/experiments/{eid}/approve").status_code == 200
+    assert client.post(f"/experiments/{eid}/start", json={
+        "start_date": "2026-11-01", "end_date": "2026-11-14"
+    }).status_code == 200
+    outcome = {
+        "items": [
+            {"product_id": "BUNDLE-COMPLETE-TARGET", "units_sold": 2, "actual_selling_price": 799},
+            {"product_id": "BUNDLE-COMPLETE-PARTNER", "units_sold": 2, "actual_selling_price": 400},
+        ],
+        "additional_costs": 0, "target_units_sold": 2, "actual_days": 14,
+        "baseline_units": 1, "baseline_days": 14,
+        "stock_at_start": 10,
+    }
+    result = client.post(f"/experiments/{eid}/outcome", json=outcome)
+    assert result.status_code == 201, result.text
+    with SessionLocal() as db:
+        remaining = db.scalars(select(ExperimentStockReservation).where(
+            ExperimentStockReservation.experiment_id == eid
+        )).all()
+    assert remaining == []

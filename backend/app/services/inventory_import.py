@@ -110,6 +110,7 @@ def _update_existing_product(
 def import_inventory_csv(
     db: Session,
     content: bytes,
+    retailer_id: str = DEFAULT_RETAILER_ID,
 ) -> InventoryImportResult:
     """Validate and import a CSV in one database transaction.
 
@@ -135,7 +136,7 @@ def import_inventory_csv(
 
         if valid_skus:
             statement = select(Product).where(
-                Product.retailer_id == DEFAULT_RETAILER_ID,
+                Product.retailer_id == retailer_id,
                 Product.sku.in_(valid_skus),
             )
             products = db.scalars(statement).all()
@@ -161,7 +162,7 @@ def import_inventory_csv(
             else:
                 # New products store blank optional cells as NULL.
                 product = Product(
-                    retailer_id=DEFAULT_RETAILER_ID,
+                    retailer_id=retailer_id,
                     **row.values,
                 )
                 db.add(product)

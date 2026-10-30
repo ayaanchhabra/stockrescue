@@ -9,9 +9,18 @@ Everything below uses illustrative data (NOT real Qloo data).
 """
 
 import os
+import hashlib
+import json
 
 os.environ["DATABASE_URL"] = "sqlite://"   # one shared in-memory DB (StaticPool)
-os.environ["QLOO_API_KEY"] = "test-key"    # fake key; the network is disabled below
+os.environ["QLOO_API_KEY"] = "test-key"
+# Deterministic test-only credentials; never used outside these isolated tests.
+TEST_RETAILER_TOKEN = "test-retailer-token-32-characters-minimum"
+OTHER_RETAILER_TOKEN = "other-retailer-token-32-characters-min"
+os.environ["RETAILER_API_TOKEN_HASHES"] = json.dumps({
+    hashlib.sha256(TEST_RETAILER_TOKEN.encode()).hexdigest(): "demo",
+    hashlib.sha256(OTHER_RETAILER_TOKEN.encode()).hexdigest(): "other",
+})    # fake key; the network is disabled below
 
 import pytest  # noqa: E402
 

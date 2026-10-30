@@ -1,6 +1,7 @@
 from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 from sqlalchemy.pool import StaticPool
+from fastapi import Request
 
 from app.config import settings
 
@@ -19,17 +20,12 @@ class Base(DeclarativeBase):
     pass
 
 
-def commit_or_rollback(db):
-    """Commit one business operation atomically or reset the failed unit of work."""
-    try:
-        db.commit()
-    except Exception:
-        db.rollback()
-        raise
-
-
-def get_db():
+def get_db(request: Request):
     db = SessionLocal()
+    # HTTP requests receive their tenant exclusively from the auth middleware.
+    retailer_id = getattr(request.state, "retailer_id", None)
+    if retailer_id:
+        db.info["retailer_id"] = retailer_id
     try:
         yield db
     finally:

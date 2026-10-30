@@ -25,7 +25,7 @@ import functools
 import logging
 from typing import Callable, Optional
 
-from fastapi import APIRouter, Body, Depends, Header, Response
+from fastapi import APIRouter, Body, Depends, Response
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
@@ -171,13 +171,7 @@ def get_plan(plan_id: int, db: Session = Depends(get_db)):
 @router.post("/plans/{plan_id}/strategies/{rank}/experiment", response_model=ExperimentOut,
              status_code=201)
 @_safe
-def create_experiment_from_strategy(
-    plan_id: int,
-    rank: int,
-    response: Response,
-    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key", max_length=128),
-    db: Session = Depends(get_db),
-):
+def create_experiment_from_strategy(plan_id: int, rank: int, db: Session = Depends(get_db)):
     """Create a 'proposed' experiment in Person 1's tracker from one strategy.
     The retailer still approves it with POST /experiments/{id}/approve."""
     found = adapters.load_plan(db, plan_id)
@@ -190,9 +184,7 @@ def create_experiment_from_strategy(
     except ValueError as e:
         return _err(422, "invalid_plan", f"Plan cannot be turned into an experiment: {e}")
     try:
-        exp = experiment_service.create_experiment(db, data, idempotency_key=idempotency_key)
-        if getattr(exp, "_idempotent_replay", False):
-            response.status_code = 200
+        exp = experiment_service.create_experiment(db, data)
     except NotFound as e:
         return _err(404, "not_found", str(e))
     except ConstraintViolation as e:
@@ -236,14 +228,10 @@ def rescue_product(
 
     try:
         plan_id = adapters.save_plan(db, plan, retailer_id, list(getattr(gateway, "evidence_ids", [])))
-    except Exception:  # noqa: BLE001 - persistence is required for downstream experiment creation
+    except Exception:  # noqa: BLE001 - downstream experiments require persisted provenance
         db.rollback()
         log.exception("Could not persist rescue plan for product %s", product_pk)
-        return _err(
-            503,
-            "plan_persistence_failed",
-            "The rescue plan could not be saved. No usable plan was returned; "
-            "check database readiness and retry.",
-        )
+        return _err(500, "plan_persistence_failed",
+                    "The rescue plan could not be saved. No experiment can be created from this result.")
     response.headers[PLAN_ID_HEADER] = str(plan_id)
     return plan

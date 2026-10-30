@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
+from app.tenant import retailer_id_for
 from app.models.entities import Product
 from app.services.inventory_csv import (
     MAX_UPLOAD_BYTES,
@@ -21,7 +22,6 @@ from app.services.inventory_csv import (
     preview_inventory_csv,
 )
 from app.services.inventory_import import (
-    DEFAULT_RETAILER_ID,
     import_inventory_csv,
 )
 from app.services.inventory_metrics import build_inventory_dashboard
@@ -98,7 +98,7 @@ def preview_inventory(
     existing_skus: set[str] = set()
     if valid_skus:
         statement = select(Product.sku).where(
-            Product.retailer_id == DEFAULT_RETAILER_ID,
+            Product.retailer_id == retailer_id_for(db),
             Product.sku.in_(valid_skus),
         )
         existing_skus = set(db.scalars(statement).all())
@@ -138,7 +138,7 @@ def import_inventory(
     """Import valid rows in one transaction and report row-level outcomes."""
     try:
         content = _read_csv_upload(file)
-        result = import_inventory_csv(db, content)
+        result = import_inventory_csv(db, content, retailer_id=retailer_id_for(db))
     except InventoryFileError as exc:
         return _file_error(str(exc))
 
@@ -165,7 +165,7 @@ def inventory_dashboard(db: Session = Depends(get_db)):
     """Return slow-moving metrics for the MVP retailer's current inventory."""
     statement = (
         select(Product)
-        .where(Product.retailer_id == DEFAULT_RETAILER_ID)
+        .where(Product.retailer_id == retailer_id_for(db))
         .order_by(Product.id)
     )
     products = db.scalars(statement).all()

@@ -34,7 +34,12 @@ PARTNER = StockItem(ProductRef("B002", "Companion Essays", 5, 200, 400), (), ("l
 STOCK = [TARGET, PARTNER]
 CONSTRAINTS = Constraints()
 
-ENTITY = QlooRelatedEntity("ent-1", "Companion Essays", "book", (), ("literary",), "raw/ent-1")
+ENTITY = QlooRelatedEntity(
+    "ent-1", "Companion Essays", "urn:entity:book", (), ("literary",), "qloo_evidence:7",
+    qloo_affinity=0.72, source_entity_id="ent-0", source_entity_type="urn:entity:book",
+    evidence_id=7, request_params={"signal.interests.entities": "ent-0"},
+    fetched_at="2026-10-30T06:00:00+00:00",
+)
 STRONG = QlooResolution(QlooStatus.STRONG_MATCH, "ent-0", "Slow Literary Novel")
 
 

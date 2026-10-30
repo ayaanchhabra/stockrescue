@@ -63,16 +63,33 @@ class Evidence(_Base):
     entity_name: Optional[str] = None
     entity_type: Optional[str] = None
     affinity: Optional[float] = Field(None, description="Qloo query.affinity, only when returned by Qloo.")
+    qloo_affinity: Optional[float] = Field(None, description="Provider affinity; never an internal score.")
+    source_entity_id: Optional[str] = None
+    source_entity_type: Optional[str] = None
+    evidence_id: Optional[int] = None
+    request_params: Optional[dict] = None
+    fetched_at: Optional[datetime] = None
     raw_ref: Optional[str] = Field(
         None,
         description="Pointer to the stored raw Qloo response (provenance).",
     )
 
     @model_validator(mode="after")
-    def qloo_evidence_needs_an_id(self) -> "Evidence":
-        # Never label something as Qloo evidence without a Qloo identifier.
-        if self.source == EvidenceSource.QLOO and not self.entity_id:
-            raise ValueError("Evidence with source='qloo' must include entity_id")
+    def qloo_evidence_needs_verifiable_provenance(self) -> "Evidence":
+        # Every Qloo claim must point back to the exact stored provider response.
+        if self.source == EvidenceSource.QLOO:
+            if not self.entity_id:
+                raise ValueError("Evidence with source='qloo' must include destination entity_id")
+            if not self.source_entity_id:
+                raise ValueError("Qloo evidence must include its source_entity_id")
+            if self.evidence_id is None or self.evidence_id <= 0:
+                raise ValueError("Qloo evidence must include a positive stored evidence_id")
+            if self.raw_ref != f"qloo_evidence:{self.evidence_id}":
+                raise ValueError("Qloo evidence raw_ref must match its stored evidence_id")
+            if self.request_params is None:
+                raise ValueError("Qloo evidence must preserve request_params (an empty object is valid)")
+            if self.fetched_at is None:
+                raise ValueError("Qloo evidence must preserve its provider fetch timestamp")
         return self
 
 

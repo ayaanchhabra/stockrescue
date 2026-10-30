@@ -4,8 +4,8 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 from typing import Any
 
-from sqlalchemy import (JSON, Boolean, CheckConstraint, Date, DateTime, Float, ForeignKey,
-                        Index, Integer, String, Text, UniqueConstraint, text)
+from sqlalchemy import (JSON, Boolean, CheckConstraint, Date, DateTime, Float,
+                        ForeignKey, Index, Integer, String, Text, UniqueConstraint, text)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.session import Base
@@ -29,6 +29,7 @@ class Product(Base):
     product_name: Mapped[str] = mapped_column(String(300))
     category: Mapped[str] = mapped_column(String(100), default="Books")
     creator_or_brand: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    isbn13: Mapped[str | None] = mapped_column(String(13), nullable=True)
     quantity_in_stock: Mapped[int] = mapped_column(Integer)
     unit_cost: Mapped[float] = mapped_column(Float)
     selling_price: Mapped[float] = mapped_column(Float)
@@ -93,8 +94,7 @@ class RescueExperiment(Base):
     __tablename__ = "rescue_experiments"
     __table_args__ = (
         Index(
-            "uq_plan_strategy_live",
-            "plan_id", "product_pk", "title", "strategy_type",
+            "uq_plan_strategy_live", "plan_id", "product_pk", "title", "strategy_type",
             unique=True,
             sqlite_where=text("status NOT IN ('rejected', 'cancelled')"),
             postgresql_where=text("status NOT IN ('rejected', 'cancelled')"),
@@ -123,6 +123,41 @@ class RescueExperiment(Base):
     outcome: Mapped["ExperimentOutcome | None"] = relationship(back_populates="experiment", uselist=False)
 
 
+class ExperimentStockReservation(Base):
+    """Exclusive commitment of a SKU to one active approved/running test."""
+    __tablename__ = "experiment_stock_reservations"
+    __table_args__ = (
+        UniqueConstraint("product_pk", name="uq_active_experiment_product_reservation"),
+        UniqueConstraint("experiment_id", "product_pk", name="uq_experiment_product_reservation"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    experiment_id: Mapped[int] = mapped_column(
+        ForeignKey("rescue_experiments.id", ondelete="CASCADE"), index=True
+    )
+    product_pk: Mapped[int] = mapped_column(
+        ForeignKey("products.id", ondelete="CASCADE"), index=True
+    )
+    retailer_id: Mapped[str] = mapped_column(String(64), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class IdempotencyRecord(Base):
+    """Tenant-scoped record preventing duplicate experiment creation on retries."""
+    __tablename__ = "idempotency_records"
+    __table_args__ = (
+        UniqueConstraint("retailer_id", "idempotency_key", name="uq_idempotency_retailer_key"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    retailer_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    resource_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    resource_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class ExperimentOutcome(Base):
     __tablename__ = "experiment_outcomes"
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -134,18 +169,3 @@ class ExperimentOutcome(Base):
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     experiment: Mapped["RescueExperiment"] = relationship(back_populates="outcome")
-
-
-class IdempotencyRecord(Base):
-    """A request key tied atomically to the experiment created by that request."""
-    __tablename__ = "idempotency_records"
-    __table_args__ = (
-        UniqueConstraint("retailer_id", "idempotency_key", name="uq_idempotency_retailer_key"),
-    )
-    id: Mapped[int] = mapped_column(primary_key=True)
-    retailer_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
-    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
-    request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
-    resource_type: Mapped[str] = mapped_column(String(40), default="experiment", nullable=False)
-    resource_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

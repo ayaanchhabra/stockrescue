@@ -1,26 +1,50 @@
 import logging
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from sqlalchemy import inspect, text
+
 from app import models  # noqa: F401  (registers tables)
 from app.api import experiments, health, inventory, qloo, rescue
 from app.config import settings
-from app.errors import (ConstraintViolation, DuplicateExperiment, IdempotencyConflict,
-                        InvalidTransition, NeedsResolution, NotFound)
+from app.db.session import Base, engine
+from app.errors import (ConstraintViolation, DuplicateExperiment, InvalidTransition,
+                        NeedsResolution, NotFound, StockCommitmentConflict)
+from app.security import SecurityConfigurationError, authenticate_bearer, rate_limiter
 from app.services.experiment_calc import CalcError
 from app.services.qloo_service import QlooError
 
 log = logging.getLogger("stockrescue")
 
 
-# Database schema is managed exclusively through Alembic. Run
-# `alembic upgrade head` before starting the application; startup must never
-# mutate production schema implicitly.
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    # Hackathon shortcut. Replace with Alembic migrations before production use.
+    Base.metadata.create_all(bind=engine)
+    # Compatibility patch for installations created before the experiment
+    # accounting snapshot field was introduced. New databases get it from
+    # metadata; old SQLite/PostgreSQL databases are upgraded without data loss.
+    inspector = inspect(engine)
+    if "products" in inspector.get_table_names():
+        product_columns = {column["name"] for column in inspector.get_columns("products")}
+        if "isbn13" not in product_columns:
+            with engine.begin() as connection:
+                connection.execute(text("ALTER TABLE products ADD COLUMN isbn13 VARCHAR(13)"))
+    if "rescue_experiments" in inspector.get_table_names():
+        columns = {column["name"] for column in inspector.get_columns("rescue_experiments")}
+        if "product_snapshot" not in columns:
+            with engine.begin() as connection:
+                connection.execute(text("ALTER TABLE rescue_experiments ADD COLUMN product_snapshot JSON"))
+    yield
 
-app = FastAPI(title="StockRescue API", version="0.1.0")
+
+app = FastAPI(title="StockRescue API", version="0.1.0", lifespan=lifespan)
 
 app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origin_list,
-                   allow_methods=["*"], allow_headers=["*"],
+                   allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+                   allow_headers=["Authorization", "Content-Type", "X-Request-ID", "Idempotency-Key"],
                    expose_headers=["X-Rescue-Plan-Id"])
 
 QLOO_HTTP = {"not_configured": 503, "auth": 502, "timeout": 504, "rate_limited": 429,
@@ -56,14 +80,18 @@ async def _dup(_: Request, e: DuplicateExperiment):
     return _err(409, "duplicate_experiment", str(e))
 
 
-@app.exception_handler(IdempotencyConflict)
-async def _idempotency_conflict(_: Request, e: IdempotencyConflict):
-    return _err(409, "idempotency_conflict", str(e))
-
-
 @app.exception_handler(NeedsResolution)
 async def _nr(_: Request, e: NeedsResolution):
     return _err(409, "needs_resolution", str(e))
+
+
+@app.exception_handler(StockCommitmentConflict)
+async def _stock_conflict(_: Request, e: StockCommitmentConflict):
+    return JSONResponse(status_code=409, content={
+        "error": "stock_commitment_conflict",
+        "message": str(e),
+        "conflicting_skus": e.skus,
+    })
 
 
 @app.exception_handler(CalcError)
@@ -75,6 +103,46 @@ async def _ce(_: Request, e: CalcError):
 async def _unhandled(_: Request, e: Exception):
     log.exception("Unhandled error")  # stack trace goes to logs, not to the user
     return _err(500, "internal_error", "Something went wrong on our side.")
+
+
+@app.middleware("http")
+async def authenticate_and_limit(request: Request, call_next):
+    """Require a retailer bearer token for API traffic and set tenant context."""
+    path = request.url.path
+    public_paths = {"/health", "/docs", "/openapi.json", "/redoc"}
+    if request.method == "OPTIONS" or path in public_paths:
+        return await call_next(request)
+
+    try:
+        retailer_id = authenticate_bearer(request.headers.get("authorization"))
+    except SecurityConfigurationError:
+        return _err(503, "auth_not_configured",
+                    "API authentication is not configured; set retailer token hashes before serving API traffic.")
+    if retailer_id is None:
+        return JSONResponse(
+            status_code=401,
+            headers={"WWW-Authenticate": "Bearer"},
+            content={"error": "unauthorized", "message": "A valid retailer bearer token is required."},
+        )
+    request.state.retailer_id = retailer_id
+
+    # This limiter is process-local: use one API worker until a shared limiter
+    # (for example Redis) is configured for a multi-worker deployment.
+    limit_key = None
+    limit = None
+    if (path in {"/qloo/status", "/qloo/search"}
+            or (path.startswith("/products/") and "/qloo/" in path
+                and path.rsplit("/", 1)[-1] in {"resolve", "insights"})):
+        limit_key, limit = (retailer_id, "qloo"), settings.qloo_requests_per_minute
+    elif path.startswith("/rescue/") and path.rsplit("/", 1)[-1].isdigit() and request.method == "POST":
+        limit_key, limit = (retailer_id, "rescue"), settings.rescue_runs_per_minute
+    if limit_key and not rate_limiter.allow(limit_key, limit or 1):
+        return JSONResponse(
+            status_code=429,
+            headers={"Retry-After": "60"},
+            content={"error": "rate_limited", "message": "Request limit reached. Retry in 60 seconds."},
+        )
+    return await call_next(request)
 
 
 app.include_router(health.router)

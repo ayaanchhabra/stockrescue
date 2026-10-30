@@ -8,7 +8,7 @@ import pytest
 
 from app.agent import adapters
 from app.agent.tools import ToolError, call_tool, list_tools
-from app.models import QlooEntityMapping
+from app.models import QlooEntityMapping, QlooEvidence
 from app.schemas.qloo import InsightEntity, InsightsResult
 from app.schemas.rescue import RescuePlan
 from p2_helpers import add_mapping, add_product
@@ -27,10 +27,22 @@ def shop(db, monkeypatch):
     p = add_product(db, "P1", "Companion Essays", qty=6, cost=200, price=400)
     add_mapping(db, t, status="strong", entity_id="ent-t")
 
+    next_evidence_id = iter(range(41, 100))
+
     def fake_insights(session, pk, take=10, target_type="urn:entity:book"):  # TEST DOUBLE
-        return 41, InsightsResult(source_entity_id="ent-t", target_type=target_type,
-                                  request_params={}, fetched_at="x",
-                                  entities=[InsightEntity(entity_id="ent-ce", name="Companion Essays")])
+        evidence_id = next(next_evidence_id)
+        params = {"filter.type": target_type, "signal.interests.entities": "ent-t", "take": take}
+        fetched_at = "2026-10-27T00:00:00+00:00"
+        raw = {"results": {"entities": [{"entity_id": "ent-ce", "name": "Companion Essays"}]}}
+        session.add(QlooEvidence(
+            id=evidence_id, product_pk=pk, kind="insights", request_path="/v2/insights",
+            request_params=params, response_json=raw, from_cache=False,
+            fetched_at=__import__("datetime").datetime.fromisoformat(fetched_at),
+        ))
+        session.flush()
+        return evidence_id, InsightsResult(source_entity_id="ent-t", target_type=target_type,
+                                           request_params=params, fetched_at=fetched_at, raw=raw,
+                                           entities=[InsightEntity(entity_id="ent-ce", name="Companion Essays")])
 
     monkeypatch.setattr(adapters.ers, "insights_for_product", fake_insights)
     return {"t": str(t), "p": str(p)}

@@ -9,6 +9,7 @@ from __future__ import annotations
 import csv
 import io
 import math
+import re
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal, InvalidOperation
@@ -29,6 +30,7 @@ REQUIRED_COLUMNS = (
 
 OPTIONAL_COLUMNS = (
     "creator_or_brand",
+    "isbn13",
     "product_description",
     "genre_or_subcategory",
     "units_sold_30d",
@@ -55,6 +57,7 @@ STRING_MAX_LENGTHS = {
     "product_name": 300,
     "category": 100,
     "creator_or_brand": 200,
+    "isbn13": 17,  # separators are stripped before the 13-digit value is stored
     "genre_or_subcategory": 100,
     "seasonality": 100,
 }
@@ -306,6 +309,23 @@ def preview_inventory_csv(content: bytes) -> InventoryCSVPreview:
                 )
 
             values[column] = value
+
+        raw_isbn = cleaned_cell("isbn13")
+        if not raw_isbn:
+            values["isbn13"] = None
+        else:
+            normalized_isbn = re.sub(r"[\s-]", "", raw_isbn).upper()
+            valid_isbn = (len(normalized_isbn) == 13 and normalized_isbn.isdigit())
+            if valid_isbn:
+                checksum = sum(int(d) * (1 if i % 2 == 0 else 3)
+                               for i, d in enumerate(normalized_isbn[:12]))
+                valid_isbn = (10 - checksum % 10) % 10 == int(normalized_isbn[-1])
+            if not valid_isbn:
+                add_issue("isbn13", raw_isbn,
+                          "Enter a valid 13-digit ISBN-13 (hyphens/spaces are allowed).")
+                values["isbn13"] = None
+            else:
+                values["isbn13"] = normalized_isbn
 
         # Non-negative whole-number fields.
         for column in INTEGER_COLUMNS:
