@@ -36,7 +36,7 @@ import json
 import re
 from typing import Callable, Dict, Iterable, List, Optional, Set
 
-from app.schemas.rescue import QlooStatus, RescuePlan, Strategy
+from app.schemas.rescue import EvidenceSource, QlooStatus, RescuePlan, Strategy
 
 from app.services.rescue_config import DEFAULT_EXPLANATION_SETTINGS, ExplanationSettings
 
@@ -57,6 +57,18 @@ DISCARD_NOTE = (
     "An LLM explanation was discarded because it contained numbers or placeholders "
     "the system did not calculate."
 )
+FORMAT_NOTE = (
+    "An LLM explanation was discarded because it was empty, too long or not plain text."
+)
+CLAIMS_NOTE = (
+    "An LLM explanation was discarded because it made claims the system cannot support "
+    "(promised results, proof, or cultural evidence that is not available)."
+)
+_NOTE_FOR_REASON = {
+    "numbers": DISCARD_NOTE,
+    "format": FORMAT_NOTE,
+    "claims": CLAIMS_NOTE,
+}
 INVALID_JSON_NOTE = (
     "LLM explanations were discarded because the model's reply was not valid JSON "
     "in the expected format."
@@ -119,9 +131,32 @@ def _strategy_facts(s: Strategy) -> str:
     return "\n".join(lines)
 
 
+def _has_usable_qloo_evidence(s: Strategy) -> bool:
+    """Only evidence actually attached to this strategy unlocks cultural claims.
+
+    A strong/ambiguous entity-resolution status is not itself evidence that an
+    Insights request returned a useful related entity. In the real adapter,
+    such evidence carries an entity id/name and a qloo_evidence provenance ref.
+    """
+    return any(
+        evidence.source == EvidenceSource.QLOO
+        and bool(
+            evidence.entity_id
+            and evidence.entity_name
+            and evidence.raw_ref
+            and re.fullmatch(r"qloo_evidence:\d+", evidence.raw_ref)
+        )
+        for evidence in s.evidence
+    )
+
+
 def build_prompt(plan: RescuePlan) -> str:
     """The full prompt for one plan (facts for every strategy plus the rules)."""
-    qloo_ok = plan.qloo_status in (QlooStatus.STRONG_MATCH, QlooStatus.AMBIGUOUS)
+    # Resolution status alone does not prove that usable Insights evidence exists.
+    qloo_ok = (
+        plan.qloo_status not in (QlooStatus.NO_MATCH, QlooStatus.ERROR)
+        and any(_has_usable_qloo_evidence(s) for s in plan.strategies)
+    )
     header = SYSTEM_INSTRUCTIONS.format(
         placeholders=", ".join(f"{{{p}}}" for p in ALLOWED_PLACEHOLDERS),
         qloo_rule=QLOO_RULE_AVAILABLE if qloo_ok else QLOO_RULE_UNAVAILABLE,
@@ -141,56 +176,126 @@ def _number_forms(v: float) -> Set[str]:
     return forms
 
 
-def _tokens(text: Optional[str]) -> Set[str]:
-    return {t.replace(",", "").rstrip(".") for t in _NUMBER_RE.findall(text or "")}
+def _forms_of(s: Strategy, names: Iterable[str]) -> Set[str]:
+    out: Set[str] = set()
+    for name in names:
+        out |= _number_forms(_value(s, name))
+    return out
 
 
-def _deterministic_texts(s: Strategy) -> Iterable[str]:
-    yield s.name
-    yield s.summary
-    yield s.test_plan
-    yield from s.assumptions
-    yield from s.risks
-    for p in s.products:
-        yield p.product_name
-    for e in s.evidence:
-        yield e.note
-        if e.entity_name:
-            yield e.entity_name
+def _day_counts(s: Strategy) -> Set[str]:
+    """Test lengths written by code in the test plan ('for 14 days')."""
+    return set(re.findall(r"(\d+)\s*-?\s*days?\b", s.test_plan, flags=re.IGNORECASE))
 
 
 def allowed_numbers(s: Strategy) -> Set[str]:
-    """Every number string the model may write for this strategy."""
-    allowed: Set[str] = set()
-    for name in ALLOWED_PLACEHOLDERS:
-        allowed |= _number_forms(_value(s, name))
-    for text in _deterministic_texts(s):
-        allowed |= _tokens(text)
-    return allowed
+    """Every number string the model may write for this strategy: its computed
+    values in common formats, its rank and its test length. Digits inside names
+    are handled separately (the whole name must appear)."""
+    return _forms_of(s, ALLOWED_PLACEHOLDERS) | _day_counts(s)
+
+
+def _protected_names(s: Strategy) -> List[str]:
+    names = {s.name} | {p.product_name for p in s.products}
+    names |= {e.entity_name for e in s.evidence if e.entity_name}
+    return sorted((n for n in names if n), key=len, reverse=True)  # longest first
+
+
+_PCT_AFTER = re.compile(r"^\s*(?:%|per\s?cent)", re.IGNORECASE)
+_MONEY_BEFORE = re.compile(r"(?:\brs\.?|₹|\binr)\s*$", re.IGNORECASE)
+_DAYS_AFTER = re.compile(r"^\s*-?\s*days?\b", re.IGNORECASE)
+_UNITS_AFTER = re.compile(
+    r"^\s*(?:units?|copies|copy|books?|bundles?|titles?)\b|^\s+in\s+stock\b", re.IGNORECASE
+)
+_RANK_BEFORE = re.compile(r"(?:\bstrategy|\boption|\brank|\bnumber|#)\s*$", re.IGNORECASE)
+
+_NUMBER_WORDS = re.compile(
+    r"\b(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|"
+    r"fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|"
+    r"eighty|ninety|first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|"
+    r"hundreds?|thousands?|dozens?|double[sd]?|doubling|triple[sd]?|tripling|"
+    r"twice|half|quarter|\w+fold)\b",
+    re.IGNORECASE,
+)
+_CLAIMS = re.compile(
+    r"\bguarantee[sd]?\b|\bsure[- ]?fire\b|\b(?:sure|certain|bound) to\b"
+    r"|\bwill (?:definitely |certainly |surely |likely |easily )?"
+    r"(?:sell|increase|boost|lift|raise|drive|improve|double|triple|grow|clear|move)\b"
+    r"|\bproves?\b|\bproven (?:to|that)\b|\bwill be (?:a )?(?:hit|success|winner)\b",
+    re.IGNORECASE,
+)
+
+
+def _number_in_context(token: str, before: str, after: str, s: Strategy) -> bool:
+    """A raw number is only accepted if it is a value of THIS strategy AND the words
+    around it say what kind of value it is (so a stock count of 24 cannot pass as a
+    24% margin)."""
+    if _PCT_AFTER.match(after):
+        return token in _forms_of(s, ("margin_pct", "discount_pct"))
+    if _MONEY_BEFORE.search(before):
+        return token in _forms_of(
+            s, ("selling_price", "unit_cost", "profit_per_unit", "estimated_experiment_cost")
+        )
+    if _DAYS_AFTER.match(after):
+        return token in _day_counts(s)
+    if _UNITS_AFTER.match(after):
+        return token in _forms_of(s, ("units_available",))
+    if _RANK_BEFORE.search(before):
+        return token in _forms_of(s, ("rank",))
+    return False
 
 
 def _clean(text: str) -> str:
     return " ".join(_CONTROL_RE.sub(" ", text).split())
 
 
-def guard_text(text: object, s: Strategy, settings: ExplanationSettings) -> Optional[str]:
-    """Return the filled, safe explanation, or None if it must be discarded."""
+REASON_NUMBERS = "numbers"
+REASON_FORMAT = "format"
+REASON_CLAIMS = "claims"
+
+
+def check_text(
+    text: object, s: Strategy, settings: ExplanationSettings, *, qloo_usable: bool = True
+):
+    """Return (filled_text, None) if the text is safe, else (None, reason)."""
     if not isinstance(text, str):
-        return None
+        return None, REASON_FORMAT
     cleaned = _clean(text)
     if not cleaned:
-        return None
-    names = _PLACEHOLDER_RE.findall(cleaned)
-    if any(n not in ALLOWED_PLACEHOLDERS for n in names):
-        return None
-    if not _tokens(cleaned) <= allowed_numbers(s):
-        return None
+        return None, REASON_FORMAT
+    if any(n not in ALLOWED_PLACEHOLDERS for n in _PLACEHOLDER_RE.findall(cleaned)):
+        return None, REASON_NUMBERS
+
+    # Numbers: judged on the model's own words, with placeholders and whole names
+    # (e.g. "Catch-22") taken out first.
+    bare = _PLACEHOLDER_RE.sub(" ", cleaned)
+    for name in _protected_names(s):
+        bare = re.sub(re.escape(name), " ", bare, flags=re.IGNORECASE)
+    if _NUMBER_WORDS.search(bare):
+        return None, REASON_NUMBERS  # "ten", "double", "half" are numbers too
+    for m in _NUMBER_RE.finditer(bare):
+        token = m.group(0).replace(",", "").rstrip(".")
+        before, after = bare[max(0, m.start() - 12): m.start()], bare[m.end(): m.end() + 16]
+        if not _number_in_context(token, before, after, s):
+            return None, REASON_NUMBERS
+
+    if _CLAIMS.search(cleaned):
+        return None, REASON_CLAIMS
+    if not qloo_usable and re.search(r"\bqloo\b|\bcultural\b", cleaned, re.IGNORECASE):
+        return None, REASON_CLAIMS
+
     filled = _PLACEHOLDER_RE.sub(lambda m: _render(s, m.group(1)), cleaned)
-    filled = re.sub(r"\bRs\s+Rs\b", "Rs", filled).replace("%%", "%")
-    filled = filled.strip()
+    filled = re.sub(r"\bRs\s+Rs\b", "Rs", filled).replace("%%", "%").strip()
     if not filled or len(filled) > settings.max_chars:
-        return None
-    return filled
+        return None, REASON_FORMAT
+    return filled, None
+
+
+def guard_text(
+    text: object, s: Strategy, settings: ExplanationSettings, *, qloo_usable: bool = True
+) -> Optional[str]:
+    """Return the filled, safe explanation, or None if it must be discarded."""
+    return check_text(text, s, settings, qloo_usable=qloo_usable)[0]
 
 
 def parse_reply(raw: object) -> Optional[Dict[str, object]]:
@@ -231,9 +336,9 @@ def explain_plan(
     parsed = parse_reply(reply)
 
     strategies: List[Strategy] = []
-    note: Optional[str] = None
+    notes: List[str] = []
     if parsed is None:
-        note = INVALID_JSON_NOTE
+        notes.append(INVALID_JSON_NOTE)
         strategies = [s.model_copy(update={"llm_explanation": None}) for s in plan.strategies]
     else:
         for s in plan.strategies:
@@ -241,12 +346,20 @@ def explain_plan(
             if key not in parsed:
                 strategies.append(s.model_copy(update={"llm_explanation": None}))
                 continue
-            text = guard_text(parsed[key], s, settings)
+            text, reason = check_text(
+                parsed[key], s, settings,
+                qloo_usable=(
+                    plan.qloo_status not in (QlooStatus.NO_MATCH, QlooStatus.ERROR)
+                    and _has_usable_qloo_evidence(s)
+                ),
+            )
             if text is None:
-                note = DISCARD_NOTE
+                note = _NOTE_FOR_REASON[reason]
+                if note not in notes:
+                    notes.append(note)
             strategies.append(s.model_copy(update={"llm_explanation": text}))
 
     update: Dict[str, object] = {"strategies": strategies}
-    if note:
-        update["limitations"] = f"{plan.limitations} {note}"
+    if notes:
+        update["limitations"] = " ".join([plan.limitations, *notes])
     return plan.model_copy(update=update)

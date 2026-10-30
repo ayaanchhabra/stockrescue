@@ -69,10 +69,10 @@ def test_bundle_is_priced_below_the_separate_prices_and_above_the_margin_floor()
 def test_promotion_is_sized_with_max_allowed_discount_pct():
     d = by_type(generate_strategies(SLOW, [], RULES), PROMOTION)[0]
     allowed = max_allowed_discount_pct(SLOW, RULES)
-    assert allowed == 17.65  # margin floor binds before the 25% cap
+    assert allowed == 17.64  # rounded down so the exact margin floor cannot be breached
     assert d.candidate.proposed_price == 425  # the 15% target, which is below the allowed max
     assert passes(d)
-    assert "17.65%" in d.summary  # the retailer sees the limit
+    assert "17.64%" in d.summary  # the retailer sees the limit
     assert d.match_kinds == () and d.links == ()  # a discount carries no cultural evidence
     assert d.effort == "low"
 

@@ -196,3 +196,15 @@ def test_html_entities_in_names_are_decoded(fake):
     result = qloo_service.resolve("Atomic Habits")
     assert result.status == MatchStatus.AMBIGUOUS
     assert result.candidates[0].name == "Atomic Habits: Build & Break"
+
+
+def test_insights_rejects_unsupported_target_type_before_http_call(fake):
+    with pytest.raises(QlooError, match="Unsupported Insights target type"):
+        qloo_service.get_insights("A1", target_type="urn:entity:unsupported")
+    assert fake.calls == []
+
+
+def test_insights_take_must_be_bounded(fake):
+    with pytest.raises(QlooError, match="take between 1 and 30"):
+        qloo_service.get_insights("A1", take=31)
+    assert fake.calls == []

@@ -25,8 +25,8 @@ from sqlalchemy.orm import Session
 from app.services import economics_service as eco
 from app.services.constraints_service import CandidateStrategy, check_candidate
 from app.services.matcher_service import match_candidates
-from app.tenant import retailer_id_for
 from app.services.rescue_config import DEFAULT_CONSTRAINTS, DEFAULT_STRATEGY_SETTINGS
+from app.tenant import retailer_id_for
 
 from . import adapters
 from .workflow import RescueRequest, run_rescue
@@ -106,15 +106,14 @@ def _request(db: Session, product_id: str) -> RescueRequest:
 # Tools
 # ---------------------------------------------------------------------------
 
-@_tool("get_inventory", "All products owned by the authenticated retailer with stock, cost and price.",
+@_tool("get_inventory", "All products belonging to the authenticated retailer with stock, cost and price.",
        _schema({}))
 def get_inventory(db: Session):
-    retailer_id = retailer_id_for(db)
     return [
         {"product_id": s.product.product_id, "name": s.product.name, "quantity": s.product.quantity,
          "unit_cost": s.product.unit_cost, "selling_price": s.product.selling_price,
          "creators": list(s.creators), "tags": list(s.tags), "qloo_entity_id": s.qloo_entity_id}
-        for s in adapters.load_stock(db, retailer_id)
+        for s in adapters.load_stock(db, retailer_id_for(db))
     ]
 
 
@@ -151,13 +150,7 @@ def get_qloo_insights(db: Session, product_id: str):
     ents = gw.get_insights(res)
     return {"status": res.status.value,
             "entities": [{"entity_id": e.entity_id, "name": e.name, "entity_type": e.entity_type,
-                          "tags": list(e.tags),
-                          "qloo_affinity": e.qloo_affinity,
-                          "source_entity_id": e.source_entity_id,
-                          "source_entity_type": e.source_entity_type,
-                          "evidence_id": e.evidence_id,
-                          "request_params": e.request_params,
-                          "fetched_at": e.fetched_at,
+                          "tags": list(e.tags), "qloo_affinity": e.affinity,
                           "raw_ref": e.raw_ref} for e in ents]}
 
 
@@ -172,12 +165,8 @@ def find_available_inventory_candidates(db: Session, product_id: str):
     matches = match_candidates(ents, req.stock, [req.target.product.product_id])
     return [{"product_id": m.product.product_id, "name": m.product.name, "match_kind": m.match_kind,
              "qloo_entity_id": m.entity.entity_id, "qloo_entity_name": m.entity.name,
-             "reason": m.reason, "in_stock": m.product.quantity,
-             "qloo_affinity": m.entity.qloo_affinity,
-             "internal_similarity": m.similarity,
-             "qloo_source_entity_id": m.entity.source_entity_id,
-             "qloo_evidence_id": m.entity.evidence_id,
-             "raw_ref": m.entity.raw_ref} for m in matches]
+             "qloo_affinity": m.entity.affinity,
+             "reason": m.reason, "in_stock": m.product.quantity} for m in matches]
 
 
 @_tool("calculate_bundle_economics",

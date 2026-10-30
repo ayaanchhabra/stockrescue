@@ -13,6 +13,7 @@ pytest.importorskip("pydantic")
 
 from app.agent.explanation import (  # noqa: E402
     DISCARD_NOTE,
+    FORMAT_NOTE,
     INVALID_JSON_NOTE,
     allowed_numbers,
     build_prompt,
@@ -190,7 +191,7 @@ def test_empty_text_is_rejected():
     plan = make_plan()
     out = explain_plan(plan, Complete(reply(**{"1": "  \n "})))
     assert s1(out).llm_explanation is None
-    assert DISCARD_NOTE in out.limitations
+    assert FORMAT_NOTE in out.limitations
 
 
 def test_one_note_even_when_several_texts_are_rejected():

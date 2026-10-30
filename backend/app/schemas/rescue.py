@@ -62,8 +62,8 @@ class Evidence(_Base):
     entity_id: Optional[str] = Field(None, description="Qloo entity id, if source=qloo.")
     entity_name: Optional[str] = None
     entity_type: Optional[str] = None
-    # Provider-returned signal; never conflated with internal title similarity/rank scores.
-    qloo_affinity: Optional[float] = None
+    affinity: Optional[float] = Field(None, description="Qloo query.affinity, only when returned by Qloo.")
+    qloo_affinity: Optional[float] = Field(None, description="Provider affinity; never an internal score.")
     source_entity_id: Optional[str] = None
     source_entity_type: Optional[str] = None
     evidence_id: Optional[int] = None
@@ -76,8 +76,7 @@ class Evidence(_Base):
 
     @model_validator(mode="after")
     def qloo_evidence_needs_verifiable_provenance(self) -> "Evidence":
-        # A provider label is not enough: every Qloo claim must point back to
-        # the exact stored response and identify the entity used as the source.
+        # Every Qloo claim must point back to the exact stored provider response.
         if self.source == EvidenceSource.QLOO:
             if not self.entity_id:
                 raise ValueError("Evidence with source='qloo' must include destination entity_id")

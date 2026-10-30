@@ -1,0 +1,283 @@
+"""initial schema including idempotency records
+
+Revision ID: 27c4190e336d
+Revises:
+Create Date: 2026-10-30 07:34:48.343682
+"""
+from __future__ import annotations
+
+from typing import Sequence, Union
+
+from alembic import op
+import sqlalchemy as sa
+
+
+revision: str = '27c4190e336d'
+down_revision: Union[str, None] = None
+branch_labels: Union[str, Sequence[str], None] = None
+depends_on: Union[str, Sequence[str], None] = None
+
+
+def upgrade() -> None:
+    # Legacy installs used Base.metadata.create_all() at startup. When all of
+    # those tables already exist, bootstrap Alembic in place: preserve rows,
+    # add the new idempotency table/index and ensure the accounting snapshot
+    # column introduced before migrations is present.
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
+    existing = set(inspector.get_table_names())
+    legacy_tables = {
+        "products", "qloo_evidence", "qloo_entity_mappings", "rescue_plans",
+        "rescue_experiments", "experiment_outcomes",
+    }
+    if legacy_tables.issubset(existing):
+        product_columns = {column["name"] for column in inspector.get_columns("products")}
+        if "isbn13" not in product_columns:
+            op.add_column("products", sa.Column("isbn13", sa.String(length=13), nullable=True))
+
+        experiment_columns = {column["name"] for column in inspector.get_columns("rescue_experiments")}
+        if "product_snapshot" not in experiment_columns:
+            op.add_column("rescue_experiments", sa.Column("product_snapshot", sa.JSON(), nullable=True))
+            op.execute("UPDATE rescue_experiments SET product_snapshot = '{}' WHERE product_snapshot IS NULL")
+            with op.batch_alter_table("rescue_experiments") as batch_op:
+                batch_op.alter_column("product_snapshot", existing_type=sa.JSON(), nullable=False)
+        if "idempotency_records" not in existing:
+            op.create_table(
+                "idempotency_records",
+                sa.Column("id", sa.Integer(), nullable=False),
+                sa.Column("retailer_id", sa.String(length=64), nullable=False),
+                sa.Column("idempotency_key", sa.String(length=128), nullable=False),
+                sa.Column("request_hash", sa.String(length=64), nullable=False),
+                sa.Column("resource_type", sa.String(length=40), nullable=False),
+                sa.Column("resource_id", sa.Integer(), nullable=True),
+                sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+                sa.PrimaryKeyConstraint("id"),
+                sa.UniqueConstraint("retailer_id", "idempotency_key", name="uq_idempotency_retailer_key"),
+            )
+            op.create_index("ix_idempotency_records_retailer_id", "idempotency_records", ["retailer_id"])
+        if "experiment_stock_reservations" not in existing:
+            op.create_table(
+                "experiment_stock_reservations",
+                sa.Column("id", sa.Integer(), nullable=False),
+                sa.Column("experiment_id", sa.Integer(), nullable=False),
+                sa.Column("product_pk", sa.Integer(), nullable=False),
+                sa.Column("retailer_id", sa.String(length=64), nullable=False),
+                sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+                sa.ForeignKeyConstraint(["experiment_id"], ["rescue_experiments.id"], ondelete="CASCADE"),
+                sa.ForeignKeyConstraint(["product_pk"], ["products.id"], ondelete="CASCADE"),
+                sa.PrimaryKeyConstraint("id"),
+                sa.UniqueConstraint("product_pk", name="uq_active_experiment_product_reservation"),
+                sa.UniqueConstraint("experiment_id", "product_pk", name="uq_experiment_product_reservation"),
+            )
+            op.create_index("ix_experiment_stock_reservations_experiment_id", "experiment_stock_reservations", ["experiment_id"])
+            op.create_index("ix_experiment_stock_reservations_product_pk", "experiment_stock_reservations", ["product_pk"])
+            op.create_index("ix_experiment_stock_reservations_retailer_id", "experiment_stock_reservations", ["retailer_id"])
+        if "uq_plan_strategy_live" not in {idx["name"] for idx in inspector.get_indexes("rescue_experiments")}:
+            op.create_index(
+                "uq_plan_strategy_live", "rescue_experiments",
+                ["plan_id", "product_pk", "title", "strategy_type"], unique=True,
+                sqlite_where=sa.text("status NOT IN ('rejected', 'cancelled')"),
+                postgresql_where=sa.text("status NOT IN ('rejected', 'cancelled')"),
+            )
+        return
+
+    # A completely new database receives the complete current schema below.
+    # A partially-created legacy schema is unsafe to guess at; fail clearly.
+    if existing.intersection(legacy_tables):
+        missing = sorted(legacy_tables - existing)
+        raise RuntimeError("Partial legacy database schema; missing tables: " + ", ".join(missing))
+
+    # ### commands auto generated by Alembic - please adjust! ###
+    op.create_table('idempotency_records',
+    sa.Column('id', sa.Integer(), nullable=False),
+    sa.Column('retailer_id', sa.String(length=64), nullable=False),
+    sa.Column('idempotency_key', sa.String(length=128), nullable=False),
+    sa.Column('request_hash', sa.String(length=64), nullable=False),
+    sa.Column('resource_type', sa.String(length=40), nullable=False),
+    sa.Column('resource_id', sa.Integer(), nullable=True),
+    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
+    sa.PrimaryKeyConstraint('id'),
+    sa.UniqueConstraint('retailer_id', 'idempotency_key', name='uq_idempotency_retailer_key')
+    )
+    with op.batch_alter_table('idempotency_records', schema=None) as batch_op:
+        batch_op.create_index(batch_op.f('ix_idempotency_records_retailer_id'), ['retailer_id'], unique=False)
+
+    op.create_table('products',
+    sa.Column('id', sa.Integer(), nullable=False),
+    sa.Column('retailer_id', sa.String(length=64), nullable=False),
+    sa.Column('sku', sa.String(length=64), nullable=False),
+    sa.Column('product_name', sa.String(length=300), nullable=False),
+    sa.Column('category', sa.String(length=100), nullable=False),
+    sa.Column('creator_or_brand', sa.String(length=200), nullable=True),
+    sa.Column('isbn13', sa.String(length=13), nullable=True),
+    sa.Column('quantity_in_stock', sa.Integer(), nullable=False),
+    sa.Column('unit_cost', sa.Float(), nullable=False),
+    sa.Column('selling_price', sa.Float(), nullable=False),
+    sa.Column('units_sold_30d', sa.Integer(), nullable=True),
+    sa.Column('units_sold_60d', sa.Integer(), nullable=True),
+    sa.Column('units_sold_90d', sa.Integer(), nullable=True),
+    sa.Column('days_in_stock', sa.Integer(), nullable=True),
+    sa.Column('product_description', sa.Text(), nullable=True),
+    sa.Column('genre_or_subcategory', sa.String(length=100), nullable=True),
+    sa.Column('publication_or_release_date', sa.Date(), nullable=True),
+    sa.Column('seasonality', sa.String(length=100), nullable=True),
+    sa.Column('minimum_acceptable_margin', sa.Float(), nullable=True),
+    sa.Column('maximum_discount_percentage', sa.Float(), nullable=True),
+    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
+    sa.CheckConstraint('quantity_in_stock >= 0', name='ck_qty_nonneg'),
+    sa.CheckConstraint('selling_price > 0', name='ck_price_pos'),
+    sa.CheckConstraint('unit_cost >= 0', name='ck_cost_nonneg'),
+    sa.PrimaryKeyConstraint('id'),
+    sa.UniqueConstraint('retailer_id', 'sku', name='uq_retailer_sku')
+    )
+    with op.batch_alter_table('products', schema=None) as batch_op:
+        batch_op.create_index(batch_op.f('ix_products_retailer_id'), ['retailer_id'], unique=False)
+        batch_op.create_index(batch_op.f('ix_products_sku'), ['sku'], unique=False)
+
+    op.create_table('rescue_plans',
+    sa.Column('id', sa.Integer(), nullable=False),
+    sa.Column('retailer_id', sa.String(length=64), nullable=False),
+    sa.Column('product_ids', sa.JSON(), nullable=False),
+    sa.Column('status', sa.String(length=20), nullable=False),
+    sa.Column('generated_at', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('evidence_ids', sa.JSON(), nullable=False),
+    sa.Column('constraints_snapshot', sa.JSON(), nullable=False),
+    sa.Column('ranking_rationale', sa.JSON(), nullable=False),
+    sa.Column('plan_json', sa.JSON(), nullable=False),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_table('qloo_evidence',
+    sa.Column('id', sa.Integer(), nullable=False),
+    sa.Column('product_pk', sa.Integer(), nullable=True),
+    sa.Column('kind', sa.String(length=20), nullable=False),
+    sa.Column('request_path', sa.String(length=100), nullable=False),
+    sa.Column('request_params', sa.JSON(), nullable=False),
+    sa.Column('response_json', sa.JSON(), nullable=False),
+    sa.Column('from_cache', sa.Boolean(), nullable=False),
+    sa.Column('fetched_at', sa.DateTime(timezone=True), nullable=False),
+    sa.ForeignKeyConstraint(['product_pk'], ['products.id'], ),
+    sa.PrimaryKeyConstraint('id')
+    )
+    with op.batch_alter_table('qloo_evidence', schema=None) as batch_op:
+        batch_op.create_index(batch_op.f('ix_qloo_evidence_product_pk'), ['product_pk'], unique=False)
+
+    op.create_table('rescue_experiments',
+    sa.Column('id', sa.Integer(), nullable=False),
+    sa.Column('plan_id', sa.Integer(), nullable=True),
+    sa.Column('product_pk', sa.Integer(), nullable=False),
+    sa.Column('strategy_type', sa.String(length=30), nullable=False),
+    sa.Column('title', sa.String(length=200), nullable=False),
+    sa.Column('proposed_action', sa.Text(), nullable=False),
+    sa.Column('bundle_product_pks', sa.JSON(), nullable=False),
+    sa.Column('product_snapshot', sa.JSON(), nullable=False),
+    sa.Column('proposed_price', sa.Float(), nullable=True),
+    sa.Column('estimated_cost', sa.Float(), nullable=False),
+    sa.Column('calculated_margin_pct', sa.Float(), nullable=True),
+    sa.Column('qloo_evidence_ids', sa.JSON(), nullable=False),
+    sa.Column('status', sa.String(length=20), nullable=False),
+    sa.Column('start_date', sa.Date(), nullable=True),
+    sa.Column('end_date', sa.Date(), nullable=True),
+    sa.Column('approved_by', sa.String(length=100), nullable=True),
+    sa.Column('approved_at', sa.DateTime(timezone=True), nullable=True),
+    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
+    sa.ForeignKeyConstraint(['plan_id'], ['rescue_plans.id'], ),
+    sa.ForeignKeyConstraint(['product_pk'], ['products.id'], ),
+    sa.PrimaryKeyConstraint('id')
+    )
+    with op.batch_alter_table('rescue_experiments', schema=None) as batch_op:
+        batch_op.create_index(batch_op.f('ix_rescue_experiments_plan_id'), ['plan_id'], unique=False)
+        batch_op.create_index(batch_op.f('ix_rescue_experiments_product_pk'), ['product_pk'], unique=False)
+        batch_op.create_index(batch_op.f('ix_rescue_experiments_status'), ['status'], unique=False)
+    op.create_index(
+        'uq_plan_strategy_live', 'rescue_experiments',
+        ['plan_id', 'product_pk', 'title', 'strategy_type'], unique=True,
+        sqlite_where=sa.text("status NOT IN ('rejected', 'cancelled')"),
+        postgresql_where=sa.text("status NOT IN ('rejected', 'cancelled')"),
+    )
+
+    op.create_table(
+        'experiment_stock_reservations',
+        sa.Column('id', sa.Integer(), nullable=False),
+        sa.Column('experiment_id', sa.Integer(), nullable=False),
+        sa.Column('product_pk', sa.Integer(), nullable=False),
+        sa.Column('retailer_id', sa.String(length=64), nullable=False),
+        sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
+        sa.ForeignKeyConstraint(['experiment_id'], ['rescue_experiments.id'], ondelete='CASCADE'),
+        sa.ForeignKeyConstraint(['product_pk'], ['products.id'], ondelete='CASCADE'),
+        sa.PrimaryKeyConstraint('id'),
+        sa.UniqueConstraint('product_pk', name='uq_active_experiment_product_reservation'),
+        sa.UniqueConstraint('experiment_id', 'product_pk', name='uq_experiment_product_reservation'),
+    )
+    op.create_index('ix_experiment_stock_reservations_experiment_id', 'experiment_stock_reservations', ['experiment_id'], unique=False)
+    op.create_index('ix_experiment_stock_reservations_product_pk', 'experiment_stock_reservations', ['product_pk'], unique=False)
+    op.create_index('ix_experiment_stock_reservations_retailer_id', 'experiment_stock_reservations', ['retailer_id'], unique=False)
+
+    op.create_table('experiment_outcomes',
+    sa.Column('id', sa.Integer(), nullable=False),
+    sa.Column('experiment_id', sa.Integer(), nullable=False),
+    sa.Column('is_simulated', sa.Boolean(), nullable=False),
+    sa.Column('inputs', sa.JSON(), nullable=False),
+    sa.Column('calculated', sa.JSON(), nullable=False),
+    sa.Column('limitations', sa.JSON(), nullable=False),
+    sa.Column('notes', sa.Text(), nullable=True),
+    sa.Column('recorded_at', sa.DateTime(timezone=True), nullable=False),
+    sa.ForeignKeyConstraint(['experiment_id'], ['rescue_experiments.id'], ),
+    sa.PrimaryKeyConstraint('id'),
+    sa.UniqueConstraint('experiment_id')
+    )
+    op.create_table('qloo_entity_mappings',
+    sa.Column('id', sa.Integer(), nullable=False),
+    sa.Column('product_pk', sa.Integer(), nullable=False),
+    sa.Column('qloo_entity_id', sa.String(length=100), nullable=True),
+    sa.Column('qloo_entity_type', sa.String(length=100), nullable=True),
+    sa.Column('matched_name', sa.String(length=300), nullable=True),
+    sa.Column('match_status', sa.String(length=20), nullable=False),
+    sa.Column('match_reason', sa.String(length=300), nullable=False),
+    sa.Column('verification_status', sa.String(length=20), nullable=False),
+    sa.Column('candidates', sa.JSON(), nullable=False),
+    sa.Column('evidence_id', sa.Integer(), nullable=True),
+    sa.Column('last_checked_at', sa.DateTime(timezone=True), nullable=False),
+    sa.ForeignKeyConstraint(['evidence_id'], ['qloo_evidence.id'], ),
+    sa.ForeignKeyConstraint(['product_pk'], ['products.id'], ),
+    sa.PrimaryKeyConstraint('id')
+    )
+    with op.batch_alter_table('qloo_entity_mappings', schema=None) as batch_op:
+        batch_op.create_index(batch_op.f('ix_qloo_entity_mappings_product_pk'), ['product_pk'], unique=True)
+
+    # ### end Alembic commands ###
+
+
+def downgrade() -> None:
+    # ### commands auto generated by Alembic - please adjust! ###
+    with op.batch_alter_table('qloo_entity_mappings', schema=None) as batch_op:
+        batch_op.drop_index(batch_op.f('ix_qloo_entity_mappings_product_pk'))
+
+    op.drop_table('qloo_entity_mappings')
+    op.drop_table('experiment_outcomes')
+    op.drop_index('ix_experiment_stock_reservations_retailer_id', table_name='experiment_stock_reservations')
+    op.drop_index('ix_experiment_stock_reservations_product_pk', table_name='experiment_stock_reservations')
+    op.drop_index('ix_experiment_stock_reservations_experiment_id', table_name='experiment_stock_reservations')
+    op.drop_table('experiment_stock_reservations')
+    op.drop_index('uq_plan_strategy_live', table_name='rescue_experiments')
+    with op.batch_alter_table('rescue_experiments', schema=None) as batch_op:
+        batch_op.drop_index(batch_op.f('ix_rescue_experiments_status'))
+        batch_op.drop_index(batch_op.f('ix_rescue_experiments_product_pk'))
+        batch_op.drop_index(batch_op.f('ix_rescue_experiments_plan_id'))
+
+    op.drop_table('rescue_experiments')
+    with op.batch_alter_table('qloo_evidence', schema=None) as batch_op:
+        batch_op.drop_index(batch_op.f('ix_qloo_evidence_product_pk'))
+
+    op.drop_table('qloo_evidence')
+    op.drop_table('rescue_plans')
+    with op.batch_alter_table('products', schema=None) as batch_op:
+        batch_op.drop_index(batch_op.f('ix_products_sku'))
+        batch_op.drop_index(batch_op.f('ix_products_retailer_id'))
+
+    op.drop_table('products')
+    with op.batch_alter_table('idempotency_records', schema=None) as batch_op:
+        batch_op.drop_index(batch_op.f('ix_idempotency_records_retailer_id'))
+
+    op.drop_table('idempotency_records')
+    # ### end Alembic commands ###

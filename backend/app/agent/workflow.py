@@ -89,6 +89,11 @@ _NOTE_AMBIGUOUS = (
     "Qloo returned more than one plausible match for this product. Cultural links are "
     "treated as low-confidence until a person confirms the right entity."
 )
+_NOTE_AMBIGUOUS_UNCONFIRMED = (
+    "Qloo returned more than one plausible match for this product and none is confirmed, "
+    "so no cultural evidence is used until a person confirms the right one. These options "
+    "rest on retailer data and commercial rules only."
+)
 _NOTE_EMPTY_INSIGHTS = (
     "Qloo matched the product but returned no related entities, so no cultural evidence "
     "is used. These options rest on retailer data and commercial rules only."
@@ -220,7 +225,9 @@ def _run(
         elif status == QlooStatus.ERROR:
             qloo_note = resolution.note or _NOTE_UNAVAILABLE
         elif status == QlooStatus.AMBIGUOUS:
-            qloo_note = _NOTE_AMBIGUOUS
+            # With an entity id the links are used but treated as low-confidence; without
+            # one, insights are never fetched, so say plainly that no evidence is used.
+            qloo_note = _NOTE_AMBIGUOUS if resolution.entity_id else _NOTE_AMBIGUOUS_UNCONFIRMED
             if resolution.alternatives:
                 qloo_note += " Other candidates: " + "; ".join(resolution.alternatives) + "."
         else:  # STRONG_MATCH

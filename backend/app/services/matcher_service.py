@@ -65,7 +65,8 @@ class QlooRelatedEntity:
     creators: Tuple[str, ...] = ()   # authors/directors etc., if Qloo supplied them
     tags: Tuple[str, ...] = ()       # genres/themes, if Qloo supplied them
     raw_ref: Optional[str] = None    # pointer to the stored raw response (provenance)
-    qloo_affinity: Optional[float] = None  # Qloo query.affinity; NULL stays NULL
+    affinity: Optional[float] = None # Qloo's query.affinity, never an internal match score
+    qloo_affinity: Optional[float] = None
     source_entity_id: Optional[str] = None
     source_entity_type: Optional[str] = None
     evidence_id: Optional[int] = None

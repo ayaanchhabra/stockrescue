@@ -62,6 +62,10 @@ _QLOO_NOTES = {
         "treated as low-confidence until a person confirms the right entity."
     ),
 }
+_AMBIGUOUS_NO_EVIDENCE = (
+    "Qloo returned more than one plausible match for this product and none is confirmed, "
+    "so no cultural evidence is used until a person confirms the right entity."
+)
 
 
 # ---------------------------------------------------------------------------
@@ -111,11 +115,15 @@ def _qloo_evidence(target: ProductRef, links: Sequence[CandidateMatch]) -> List[
                     f"'{target.name}'. Our own matching linked it to the stocked title "
                     f"'{m.product.name}' ({_KIND_LABEL.get(m.match_kind, m.match_kind)} match): "
                     f"{m.reason}"
+                    + (f" Qloo-reported affinity: {m.entity.qloo_affinity if m.entity.qloo_affinity is not None else m.entity.affinity:.4f}."
+                       if (m.entity.qloo_affinity is not None or m.entity.affinity is not None)
+                       else " Qloo did not return an affinity value for this result.")
                 ),
                 entity_id=m.entity.entity_id,
                 entity_name=m.entity.name,
                 entity_type=m.entity.entity_type,
-                qloo_affinity=m.entity.qloo_affinity,
+                affinity=m.entity.affinity,
+                qloo_affinity=(m.entity.qloo_affinity if m.entity.qloo_affinity is not None else m.entity.affinity),
                 source_entity_id=m.entity.source_entity_id,
                 source_entity_type=m.entity.source_entity_type,
                 evidence_id=m.entity.evidence_id,
@@ -211,7 +219,7 @@ def _strategy(
         economics=_economics(scored),
         evidence=evidence,
         assumptions=list(draft.assumptions),
-        risks=list(draft.risks),
+        risks=[*draft.risks, *scored.result.warning_messages],
         operational_effort=draft.effort,
         test_plan=draft.test_plan,
         rank_reason=scored.to_rank_reason(),
@@ -282,7 +290,13 @@ def build_rescue_plan(
 
     limitations = [_BASE_LIMITATIONS]
     if status in _QLOO_NOTES:
-        limitations.append(_QLOO_NOTES[status])
+        has_qloo_evidence = any(
+            e.source == EvidenceSource.QLOO for s in strategies for e in s.evidence
+        )
+        if status == QlooStatus.AMBIGUOUS and not has_qloo_evidence:
+            limitations.append(_AMBIGUOUS_NO_EVIDENCE)  # nothing was borrowed from Qloo
+        else:
+            limitations.append(_QLOO_NOTES[status])
     if failed:
         limitations.append(
             "Incomplete analysis: these stages failed - " + ", ".join(sorted(failed)) + "."

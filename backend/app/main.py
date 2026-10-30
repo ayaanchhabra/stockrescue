@@ -4,16 +4,17 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from sqlalchemy import inspect, text
 
 from app import models  # noqa: F401  (registers tables)
-from app.api import experiments, health, qloo , rescue , inventory
+from app.api import experiments, health, inventory, qloo, rescue
 from app.config import settings
 from app.db.session import Base, engine
-from app.errors import InvalidTransition, NeedsResolution, NotFound, StockCommitmentConflict
+from app.errors import (ConstraintViolation, DuplicateExperiment, InvalidTransition,
+                        NeedsResolution, NotFound, StockCommitmentConflict)
+from app.security import SecurityConfigurationError, authenticate_bearer, rate_limiter
 from app.services.experiment_calc import CalcError
 from app.services.qloo_service import QlooError
-from app.security import (SecurityConfigurationError, authenticate_bearer,
-                           rate_limiter)
 
 log = logging.getLogger("stockrescue")
 
@@ -22,6 +23,20 @@ log = logging.getLogger("stockrescue")
 async def lifespan(_: FastAPI):
     # Hackathon shortcut. Replace with Alembic migrations before production use.
     Base.metadata.create_all(bind=engine)
+    # Compatibility patch for installations created before the experiment
+    # accounting snapshot field was introduced. New databases get it from
+    # metadata; old SQLite/PostgreSQL databases are upgraded without data loss.
+    inspector = inspect(engine)
+    if "products" in inspector.get_table_names():
+        product_columns = {column["name"] for column in inspector.get_columns("products")}
+        if "isbn13" not in product_columns:
+            with engine.begin() as connection:
+                connection.execute(text("ALTER TABLE products ADD COLUMN isbn13 VARCHAR(13)"))
+    if "rescue_experiments" in inspector.get_table_names():
+        columns = {column["name"] for column in inspector.get_columns("rescue_experiments")}
+        if "product_snapshot" not in columns:
+            with engine.begin() as connection:
+                connection.execute(text("ALTER TABLE rescue_experiments ADD COLUMN product_snapshot JSON"))
     yield
 
 
@@ -29,7 +44,7 @@ app = FastAPI(title="StockRescue API", version="0.1.0", lifespan=lifespan)
 
 app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origin_list,
                    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-                   allow_headers=["Authorization", "Content-Type", "X-Request-ID"],
+                   allow_headers=["Authorization", "Content-Type", "X-Request-ID", "Idempotency-Key"],
                    expose_headers=["X-Rescue-Plan-Id"])
 
 QLOO_HTTP = {"not_configured": 503, "auth": 502, "timeout": 504, "rate_limited": 429,
@@ -55,11 +70,19 @@ async def _it(_: Request, e: InvalidTransition):
     return _err(409, "invalid_state", str(e))
 
 
+@app.exception_handler(ConstraintViolation)
+async def _cv(_: Request, e: ConstraintViolation):
+    return _err(422, "constraint_violation", str(e))
+
+
+@app.exception_handler(DuplicateExperiment)
+async def _dup(_: Request, e: DuplicateExperiment):
+    return _err(409, "duplicate_experiment", str(e))
+
+
 @app.exception_handler(NeedsResolution)
 async def _nr(_: Request, e: NeedsResolution):
     return _err(409, "needs_resolution", str(e))
-
-
 
 
 @app.exception_handler(StockCommitmentConflict)
@@ -84,7 +107,7 @@ async def _unhandled(_: Request, e: Exception):
 
 @app.middleware("http")
 async def authenticate_and_limit(request: Request, call_next):
-    """Protect every API path except liveness/docs; assign tenant from token only."""
+    """Require a retailer bearer token for API traffic and set tenant context."""
     path = request.url.path
     public_paths = {"/health", "/docs", "/openapi.json", "/redoc"}
     if request.method == "OPTIONS" or path in public_paths:
@@ -103,8 +126,8 @@ async def authenticate_and_limit(request: Request, call_next):
         )
     request.state.retailer_id = retailer_id
 
-    # Only quota-consuming routes are throttled. The limiter is per process;
-    # the Render deployment must remain single-worker until a shared limiter exists.
+    # This limiter is process-local: use one API worker until a shared limiter
+    # (for example Redis) is configured for a multi-worker deployment.
     limit_key = None
     limit = None
     if (path in {"/qloo/status", "/qloo/search"}

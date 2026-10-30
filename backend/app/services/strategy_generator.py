@@ -244,10 +244,16 @@ def _make_reposition(
     target: ProductRef,
     groups: Sequence[Sequence[CandidateMatch]],
     s: StrategySettings,
+    constraints: Constraints,
 ) -> StrategyDraft:
     # Only titles on the shelf can sit in a display (the matcher keeps zero-stock
     # items so a bundle with one is rejected visibly, but a display needs stock).
-    shown = [g for g in groups if g[0].product.quantity > 0][: s.max_display_titles]
+    # Restricted products are never named in a display either: the constraint
+    # engine only sees the target here, so the rule has to be applied now.
+    restricted = constraints.restricted_product_ids
+    eligible = [g for g in groups if g[0].product.product_id not in restricted]
+    shown = [g for g in eligible if g[0].product.quantity > 0][: s.max_display_titles]
+    linked_but_unusable = bool(groups) and not shown
     links = tuple(g[0] for g in shown)  # best link of each displayed title
     kinds = tuple(m.match_kind for m in links)
 
@@ -267,10 +273,14 @@ def _make_reposition(
         what = "Run the themed display"
     else:
         name = f"Face-out display: {target.name}"
+        why = (
+            "Related titles were linked, but none can be shown (out of stock or restricted)"
+            if linked_but_unusable
+            else "No cultural link was available"
+        )
         summary = (
             f"Move '{target.name}' to a prominent face-out display at its normal price "
-            f"of {_money(target.selling_price)}. No cultural link was available, so there "
-            "is no themed angle."
+            f"of {_money(target.selling_price)}. {why}, so there is no themed angle."
         )
         assumptions = [
             "Better placement may increase visibility. This is an untested hypothesis.",
@@ -393,6 +403,7 @@ def generate_strategies(
         ))
     else:
         attempts = 0
+        blocked_shown = 0
         for links in groups:
             if attempts >= settings.max_bundle_attempts:
                 break
@@ -402,6 +413,17 @@ def generate_strategies(
                 skipped.append(SkippedOption(
                     BUNDLE, f"Bundle: {target.name} + {partner.name}", (problem,)))
                 continue
+            # A restricted or out-of-stock partner can never pass. Show a few so the
+            # rejection stays visible, but do not let them use up the attempts that
+            # are meant for partners that could actually work.
+            blocked = (
+                partner.product_id in constraints.restricted_product_ids
+                or partner.quantity < settings.test_units
+            )
+            if blocked:
+                if blocked_shown >= settings.max_bundle_attempts:
+                    continue
+                blocked_shown += 1
             try:
                 draft = _make_bundle(target, links, constraints, settings)
             except EconomicsError as exc:
@@ -410,12 +432,13 @@ def generate_strategies(
                     (f"Could not price the bundle: {exc}",)))
                 continue
             drafts.append(draft)
-            attempts += 1
+            if not blocked:
+                attempts += 1
             if check_candidate(draft.candidate, constraints).passed:
                 break  # one feasible bundle is enough; later partners are not needed
 
     # --- reposition --------------------------------------------------------
-    drafts.append(_make_reposition(target, groups, settings))
+    drafts.append(_make_reposition(target, groups, settings, constraints))
 
     # --- promotion ---------------------------------------------------------
     promo, promo_skipped = _make_promotion(target, constraints, settings)

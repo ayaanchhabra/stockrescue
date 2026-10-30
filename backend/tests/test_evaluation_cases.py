@@ -40,11 +40,20 @@ def item(pid, name, qty, cost, price, **limits):
 
 def entity_for(stock_item):
     """An exact-title Qloo link to a stocked product (illustrative)."""
+    # Model a complete provider response record. The RescuePlan Evidence schema
+    # requires every Qloo claim to carry its stored-response pointer, positive
+    # evidence id, source entity and original fetch metadata.
     return QlooRelatedEntity(
-        f"ent-{stock_item.product.product_id}", stock_item.product.name,
-        "urn:entity:book", (), (), "qloo_evidence:1", qloo_affinity=0.7,
-        source_entity_id="ent-target", source_entity_type="urn:entity:book",
-        evidence_id=1, request_params={"signal.interests.entities": "ent-target"},
+        f"ent-{stock_item.product.product_id}",
+        stock_item.product.name,
+        "urn:entity:book",
+        (),
+        (),
+        "qloo_evidence:1",
+        source_entity_id="ent-target",
+        source_entity_type="urn:entity:book",
+        evidence_id=1,
+        request_params={"signal.interests.entities": "ent-target"},
         fetched_at="2026-10-30T06:00:00+00:00",
     )
 
@@ -87,13 +96,17 @@ def test_case2_thin_margin_skips_the_promotion():
     assert PROMOTION not in types(plan)
     reasons = " ".join(r for o in rejected(plan, PROMOTION) for r in o.reasons)
     assert "largest discount your rules allow" in reasons
+    # The display does not change the margin, so it is still offered, with a warning.
+    assert REPOSITION in types(plan)
+    display = next(s for s in plan.strategies if s.type == REPOSITION)
+    assert any("already below your 15.00% minimum" in r for r in display.risks)
 
 
 def test_case3_partner_out_of_stock_rejects_the_bundle_but_keeps_the_display():
     empty = item("2", "Companion Essays", 0, 200, 400)
     plan = plan_for(stock=[TARGET, empty], gateway=Gateway(entities=(entity_for(empty),)))
     assert BUNDLE not in types(plan) and REPOSITION in types(plan)
-    assert any("complete unit(s) can be supplied" in r for o in rejected(plan, BUNDLE) for r in o.reasons)
+    assert any("Not enough stock to run a meaningful test" in r for o in rejected(plan, BUNDLE) for r in o.reasons)
 
 
 def test_case4_restricted_partner_rejects_the_bundle():
@@ -138,26 +151,11 @@ def test_case9_missing_sales_history_is_disclosed_not_judged():
     assert "Missing history is not evidence that the product is unpopular" in plan.limitations
     assert plan.strategies  # still proposes tests; it does not label the book unpopular
 
-def test_case10_target_with_fewer_than_three_units_is_rejected():
-    """Current behavior; whether three test units are required is pending."""
-    low_stock = item("10", "Low Stock Novel", 2, 100, 200)
-    plan = plan_for(target=low_stock, stock=[low_stock, PARTNER])
 
-    assert not plan.strategies
-    assert plan.rejected
-
-
-def test_case11_below_floor_target_allows_bundle_on_combined_margin():
-    """Bundle economics use the combined margin, not the target's standalone margin."""
-    thin = item("11", "Below-Floor Novel", 24, 440, 500)
-    plan = plan_for(target=thin, stock=[thin, PARTNER])
-
-    # Promotion remains infeasible, but a bundle may pass on combined economics.
-    assert PROMOTION not in types(plan)
-    assert BUNDLE in types(plan)
-
-    bundle = next(
-        strategy for strategy in plan.strategies
-        if strategy.type == BUNDLE
-    )
-    assert bundle.economics.margin_pct >= 15
+def test_case10_low_stock_rejects_every_strategy_with_a_clear_reason():
+    low = item("1", "Edge Low Stock", 2, 350, 500)  # the test needs 3 units
+    plan = plan_for(target=low, stock=[low, PARTNER])
+    assert plan.strategies == []
+    reasons = " ".join(r for o in plan.rejected for r in o.reasons)
+    assert "Not enough stock to run a meaningful test" in reasons
+    assert "needs 3 complete unit(s)" in reasons

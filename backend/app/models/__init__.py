@@ -1,2 +1,3 @@
-from app.models.entities import (ExperimentOutcome, Product, QlooEntityMapping,  # noqa: F401
-                                 QlooEvidence, RescueExperiment, RescuePlan, ExperimentStockReservation)
+from app.models.entities import (ExperimentOutcome, ExperimentStockReservation, IdempotencyRecord, Product,
+                                 QlooEntityMapping, QlooEvidence, RescueExperiment,
+                                 RescuePlan)  # noqa: F401

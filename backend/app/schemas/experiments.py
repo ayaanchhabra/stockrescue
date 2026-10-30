@@ -3,9 +3,9 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 
-StrategyType = Literal["bundle", "reposition", "promotion", "other"]
+StrategyType = Literal["bundle", "reposition", "promotion"]
 
 
 class ExperimentCreate(BaseModel):
@@ -17,7 +17,8 @@ class ExperimentCreate(BaseModel):
     bundle_product_pks: list[int] = Field(default_factory=list)
     proposed_price: float | None = Field(default=None, gt=0)
     estimated_cost: float = Field(default=0, ge=0)
-    calculated_margin_pct: float | None = None  # supplied by the economics service (Person 2)
+    calculated_margin_pct: float | None = Field(
+        default=None, description="Ignored: the server recomputes the margin from prices and costs.")
     qloo_evidence_ids: list[int] = Field(default_factory=list)
 
 
@@ -27,7 +28,8 @@ class ExperimentUpdate(BaseModel):
     bundle_product_pks: list[int] | None = None
     proposed_price: float | None = Field(default=None, gt=0)
     estimated_cost: float | None = Field(default=None, ge=0)
-    calculated_margin_pct: float | None = None
+    calculated_margin_pct: float | None = Field(
+        default=None, description="Ignored: the server recomputes the margin from prices and costs.")
 
 
 class ExperimentOut(BaseModel):
@@ -67,10 +69,12 @@ class StartIn(BaseModel):
 
 
 class OutcomeItemIn(BaseModel):
-    product_id: str  # SKU or name, for display
+    # `product_id` is accepted as a backwards-compatible input alias, but it
+    # always contains the retailer SKU (never a database PK or free-form name).
+    sku: str = Field(validation_alias=AliasChoices("sku", "product_id"), min_length=1, max_length=64)
     units_sold: int = Field(ge=0)
-    actual_selling_price: float = Field(ge=0)  # net of discount
-    unit_cost: float = Field(ge=0)
+    actual_selling_price: float = Field(ge=0)  # actual price paid, net of discounts
+    unit_cost: float | None = Field(default=None, ge=0, description="Deprecated/untrusted; server uses experiment snapshot.")
 
 
 class ControlIn(BaseModel):
@@ -85,11 +89,11 @@ class OutcomeIn(BaseModel):
     is_simulated: bool = False
     items: list[OutcomeItemIn] = Field(min_length=1)
     additional_costs: float = Field(default=0, ge=0)
-    target_units_sold: int = Field(ge=0)
+    target_units_sold: int | None = Field(default=None, ge=0, description="Optional consistency assertion; server derives this from target SKU sales.")
     actual_days: int = Field(ge=1)
     baseline_units: int | None = Field(default=None, ge=0)
     baseline_days: int | None = Field(default=None, ge=1)
-    stock_at_start: int | None = Field(default=None, ge=0)
+    stock_at_start: int | None = Field(default=None, ge=0, description="Deprecated consistency assertion; server uses the saved start snapshot.")
     control: ControlIn | None = None
     notes: str | None = None
 

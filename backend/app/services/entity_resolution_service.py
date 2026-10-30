@@ -33,7 +33,7 @@ def get_mapping(db: Session, product_pk: int) -> QlooEntityMapping | None:
 
 def resolve_product(db: Session, product_pk: int, force: bool = False) -> QlooEntityMapping:
     """Resolve a product to a Qloo entity and store the raw evidence.
-    A mapping a human already confirmed is kept unless force=True."""
+    Human-confirmed/rejected mappings remain final, including forced refreshes."""
     product = _product(db, product_pk)
     existing = get_mapping(db, product_pk)
     # A human confirmation/rejection is final; force refresh only applies to unjudged mappings.

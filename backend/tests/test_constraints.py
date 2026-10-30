@@ -36,7 +36,7 @@ def test_feasible_bundle_passes_and_reports_metrics():
     assert r.passed and r.violations == ()
     assert r.metrics["unit_cost"] == 550
     assert r.metrics["margin_pct"] == 31.25
-    assert r.metrics["discount_pct"] == 11.11
+    assert r.metrics["discount_pct"] == 11.11  # display value; threshold used full precision
     assert r.metrics["units_available"] == 5
 
 
@@ -133,8 +133,9 @@ def test_invalid_planned_units():
 
 def test_product_specific_margin_floor_is_stricter():
     strict = ProductRef("S1", "Strict", 10, unit_cost=350, selling_price=500, min_margin_pct=40)
-    r = check_candidate(CandidateStrategy(REPOSITION, "x", (strict,), 500, 0, 1), RULES)
-    assert cs.BELOW_MIN_MARGIN in r.codes  # 30% < 40%
+    # A price-changing strategy is blocked: 30% margin < the product's 40% floor.
+    r = check_candidate(CandidateStrategy(PROMOTION, "x", (strict,), 500, 0, 1), RULES)
+    assert cs.BELOW_MIN_MARGIN in r.codes
 
 
 def test_product_specific_discount_cap_is_stricter():
@@ -181,3 +182,95 @@ def test_weights_must_sum_to_one():
 def test_constraints_snapshot_is_serialisable():
     snap = Constraints(restricted_product_ids=frozenset({"B9", "B2"})).as_dict()
     assert snap["restricted_product_ids"] == ["B2", "B9"]
+
+
+# --- margin floor: display vs price-changing strategies ---------------------
+
+THIN = ProductRef("T1", "Thin Margin Book", quantity=24, unit_cost=440, selling_price=500)  # 12%
+
+
+def test_display_at_normal_price_is_allowed_when_margin_is_already_below_the_floor():
+    r = check_candidate(CandidateStrategy(REPOSITION, "Display", (THIN,), 500, 0, 3), RULES)
+    assert r.passed and r.violations == ()
+    assert [w.code for w in r.warnings] == [cs.MARGIN_ALREADY_BELOW_FLOOR]
+    assert "already below your 15.00% minimum" in r.warning_messages[0]
+    assert "12.00%" in r.warning_messages[0]
+
+
+def test_promotion_is_still_blocked_when_margin_is_below_the_floor():
+    r = check_candidate(promo(450, product=THIN), RULES)
+    assert not r.passed and cs.BELOW_MIN_MARGIN in r.codes
+    assert r.warnings == ()
+
+
+def test_unchanged_price_promotion_is_not_exempt():
+    r = check_candidate(promo(500, product=THIN), RULES)  # promotion type, no discount
+    assert cs.BELOW_MIN_MARGIN in r.codes
+
+
+def test_bundle_is_still_blocked_when_margin_is_below_the_floor():
+    r = check_candidate(bundle(600), RULES)
+    assert cs.BELOW_MIN_MARGIN in r.codes
+
+
+def test_display_with_a_changed_price_is_not_exempt():
+    cut = CandidateStrategy(REPOSITION, "Display", (THIN,), 480, 0, 3)  # price changed
+    r = check_candidate(cut, RULES)
+    assert cs.BELOW_MIN_MARGIN in r.codes
+
+
+def test_display_above_the_floor_has_no_warning():
+    r = check_candidate(CandidateStrategy(REPOSITION, "Display", (SLOW,), 500, 0, 3), RULES)
+    assert r.passed and r.warnings == ()
+
+
+def test_display_with_product_specific_floor_warns_instead_of_rejecting():
+    strict = ProductRef("S1", "Strict", 10, unit_cost=350, selling_price=500, min_margin_pct=40)
+    r = check_candidate(CandidateStrategy(REPOSITION, "x", (strict,), 500, 0, 1), RULES)
+    assert r.passed and "40.00% minimum" in r.warning_messages[0]
+
+
+def test_display_is_still_rejected_for_budget_and_restriction():
+    over = check_candidate(CandidateStrategy(REPOSITION, "Display", (THIN,), 500, 5000, 3), RULES)
+    assert cs.OVER_BUDGET in over.codes
+    rules = Constraints(restricted_product_ids=frozenset({"T1"}))
+    blocked = check_candidate(CandidateStrategy(REPOSITION, "Display", (THIN,), 500, 0, 3), rules)
+    assert cs.RESTRICTED_PRODUCT in blocked.codes
+
+
+# --- stock rule: wording and behaviour --------------------------------------
+
+def test_low_stock_message_explains_the_test_needs_enough_units():
+    low = ProductRef("L1", "Edge Low Stock", quantity=2, unit_cost=350, selling_price=500)
+    r = check_candidate(CandidateStrategy(REPOSITION, "Display", (low,), 500, 0, 3), RULES)
+    assert not r.passed and cs.INSUFFICIENT_STOCK in r.codes
+    msg = r.reasons[0]
+    assert "Not enough stock to run a meaningful test" in msg
+    assert "needs 3 complete unit(s)" in msg and "only 2" in msg and "Edge Low Stock" in msg
+
+
+def test_stock_exactly_equal_to_the_test_size_is_enough():
+    ok = ProductRef("L2", "Just Enough", quantity=3, unit_cost=350, selling_price=500)
+    r = check_candidate(CandidateStrategy(REPOSITION, "Display", (ok,), 500, 0, 3), RULES)
+    assert r.passed
+
+
+@pytest.mark.parametrize("margin,should_pass", [(14.999, False), (15.0, True), (15.001, True)])
+def test_min_margin_boundary_uses_unrounded_decimal(margin, should_pass):
+    # Choose price 100 and derive cost so the true margin is the stated value.
+    cost = 100.0 * (1.0 - margin / 100.0)
+    product = ProductRef("EDGE", "Boundary", 10, unit_cost=cost, selling_price=100)
+    result = check_candidate(CandidateStrategy(PROMOTION, "Boundary", (product,), 100, 0, 1), RULES)
+    assert result.passed is should_pass
+
+
+def test_margin_that_displays_as_15_percent_but_is_below_it_is_rejected():
+    product = ProductRef("EDGE", "Precision", 10, unit_cost=85.004, selling_price=100)
+    result = check_candidate(CandidateStrategy(PROMOTION, "Precision", (product,), 100, 0, 1), RULES)
+    assert not result.passed and cs.BELOW_MIN_MARGIN in result.codes
+    assert result.metrics["margin_pct"] == 15.0  # display rounded; raw decision rejected
+
+
+def test_unknown_strategy_fails_closed():
+    result = check_candidate(CandidateStrategy("other", "Legacy", (SLOW,), 500, 0, 1), RULES)
+    assert not result.passed and cs.INVALID_PLAN in result.codes

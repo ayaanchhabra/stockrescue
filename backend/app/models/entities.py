@@ -5,7 +5,7 @@ from datetime import date, datetime, timezone
 from typing import Any
 
 from sqlalchemy import (JSON, Boolean, CheckConstraint, Date, DateTime, Float,
-                        ForeignKey, Integer, String, Text, UniqueConstraint)
+                        ForeignKey, Index, Integer, String, Text, UniqueConstraint, text)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.session import Base
@@ -92,13 +92,23 @@ class RescuePlan(Base):
 
 class RescueExperiment(Base):
     __tablename__ = "rescue_experiments"
+    __table_args__ = (
+        Index(
+            "uq_plan_strategy_live", "plan_id", "product_pk", "title", "strategy_type",
+            unique=True,
+            sqlite_where=text("status NOT IN ('rejected', 'cancelled')"),
+            postgresql_where=text("status NOT IN ('rejected', 'cancelled')"),
+        ),
+    )
     id: Mapped[int] = mapped_column(primary_key=True)
     plan_id: Mapped[int | None] = mapped_column(ForeignKey("rescue_plans.id"), nullable=True, index=True)
     product_pk: Mapped[int] = mapped_column(ForeignKey("products.id"), index=True)  # target slow mover
-    strategy_type: Mapped[str] = mapped_column(String(30))  # bundle | reposition | promotion | other
+    strategy_type: Mapped[str] = mapped_column(String(30))  # bundle | reposition | promotion (unsupported values rejected at the API/service boundary)
     title: Mapped[str] = mapped_column(String(200))
     proposed_action: Mapped[str] = mapped_column(Text)
     bundle_product_pks: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    # Target + partner SKU/cost/stock snapshot (refreshed when the experiment starts).
+    product_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     proposed_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     estimated_cost: Mapped[float] = mapped_column(Float, default=0.0)
     calculated_margin_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -113,6 +123,41 @@ class RescueExperiment(Base):
     outcome: Mapped["ExperimentOutcome | None"] = relationship(back_populates="experiment", uselist=False)
 
 
+class ExperimentStockReservation(Base):
+    """Exclusive commitment of a SKU to one active approved/running test."""
+    __tablename__ = "experiment_stock_reservations"
+    __table_args__ = (
+        UniqueConstraint("product_pk", name="uq_active_experiment_product_reservation"),
+        UniqueConstraint("experiment_id", "product_pk", name="uq_experiment_product_reservation"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    experiment_id: Mapped[int] = mapped_column(
+        ForeignKey("rescue_experiments.id", ondelete="CASCADE"), index=True
+    )
+    product_pk: Mapped[int] = mapped_column(
+        ForeignKey("products.id", ondelete="CASCADE"), index=True
+    )
+    retailer_id: Mapped[str] = mapped_column(String(64), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class IdempotencyRecord(Base):
+    """Tenant-scoped record preventing duplicate experiment creation on retries."""
+    __tablename__ = "idempotency_records"
+    __table_args__ = (
+        UniqueConstraint("retailer_id", "idempotency_key", name="uq_idempotency_retailer_key"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    retailer_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    resource_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    resource_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class ExperimentOutcome(Base):
     __tablename__ = "experiment_outcomes"
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -124,22 +169,3 @@ class ExperimentOutcome(Base):
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     experiment: Mapped["RescueExperiment"] = relationship(back_populates="outcome")
-
-
-class ExperimentStockReservation(Base):
-    """Exclusive active-experiment commitment for one retailer SKU.
-
-    The current experiment schema has no per-SKU planned-unit field. The safe
-    MVP policy is therefore one approved/running experiment per SKU, rather
-    than inventing a quantity reservation. No on-hand stock is decremented.
-    """
-    __tablename__ = "experiment_stock_reservations"
-    __table_args__ = (
-        UniqueConstraint("product_pk", name="uq_active_experiment_product_reservation"),
-        UniqueConstraint("experiment_id", "product_pk", name="uq_experiment_product_reservation"),
-    )
-    id: Mapped[int] = mapped_column(primary_key=True)
-    experiment_id: Mapped[int] = mapped_column(ForeignKey("rescue_experiments.id", ondelete="CASCADE"), index=True)
-    product_pk: Mapped[int] = mapped_column(ForeignKey("products.id", ondelete="CASCADE"), index=True)
-    retailer_id: Mapped[str] = mapped_column(String(64), index=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

@@ -1,7 +1,7 @@
-from fastapi import Request
 from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 from sqlalchemy.pool import StaticPool
+from fastapi import Request
 
 from app.config import settings
 
@@ -22,8 +22,10 @@ class Base(DeclarativeBase):
 
 def get_db(request: Request):
     db = SessionLocal()
-    # Set exclusively by the authentication middleware; never trust a request-body tenant ID.
-    db.info["retailer_id"] = request.state.retailer_id
+    # HTTP requests receive their tenant exclusively from the auth middleware.
+    retailer_id = getattr(request.state, "retailer_id", None)
+    if retailer_id:
+        db.info["retailer_id"] = retailer_id
     try:
         yield db
     finally:
