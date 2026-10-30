@@ -1,95 +1,160 @@
 "use client";
 
-import Link from "next/link";
 import { useEffect, useState } from "react";
-import { getDashboard } from "@/lib/api";
-import type { Dashboard } from "@/types/dashboard";
+import Link from "next/link";
+import { ApiError, getDashboard, getHealth } from "@/lib/api";
 
-const inr = (n: number) => `₹${n.toLocaleString("en-IN")}`;
+type Flagged = {
+  product_pk: number;
+  sku: string;
+  product_name: string;
+  quantity_in_stock: number;
+  inventory_cost_tied_up: number;
+  rules_triggered: string[];
+  stock_cover_days: number | null;
+};
 
-const RULE_LABELS: Record<string, string> = {
+type Dashboard = {
+  total_products: number;
+  needs_attention_count: number;
+  not_enough_data_count: number;
+  total_inventory_cost_tied_up: number;
+  flagged_inventory_cost_tied_up: number;
+  rule_counts: Record<string, number>;
+  rule_descriptions: Record<string, string>;
+  metric_descriptions: Record<string, string>;
+  products_needing_attention: Flagged[];
+};
+
+const money = new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", maximumFractionDigits: 0 });
+
+const RULE_LABEL: Record<string, string> = {
   no_recent_sales: "No recent sales",
   aged_stock: "Aged stock",
   low_sales_velocity: "Low sales velocity",
 };
 
-export default function Home() {
+function Stat({ label, value, note, delay }: { label: string; value: string; note: string; delay: number }) {
+  return (
+    <div className="card rise p-5" style={{ animationDelay: `${delay}ms` }}>
+      <div className="text-xs uppercase tracking-widest text-[var(--muted)]">{label}</div>
+      <div className="num mt-2 font-display text-4xl">{value}</div>
+      <details className="mt-3 text-xs text-[var(--muted)]">
+        <summary className="cursor-pointer select-none">How is this calculated?</summary>
+        <p className="mt-2 leading-relaxed">{note}</p>
+      </details>
+    </div>
+  );
+}
+
+export default function OverviewPage() {
   const [data, setData] = useState<Dashboard | null>(null);
+  const [qloo, setQloo] = useState<boolean | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    getDashboard<Dashboard>().then(setData).catch((e) => setError(e.message));
+    getDashboard<Dashboard>()
+      .then(setData)
+      .catch((e) => setError(e instanceof ApiError ? e.message : "Could not load the dashboard."));
+    getHealth()
+      .then((h) => setQloo(h.qloo_key_configured))
+      .catch(() => setQloo(null));
   }, []);
 
-  if (error) return <main className="p-8 text-red-600">{error}</main>;
-  if (!data) return <main className="p-8">Loading…</main>;
-
-  const stats = [
-    { label: "Products", value: data.total_products },
-    { label: "Need attention", value: data.needs_attention_count },
-    { label: "Not enough data", value: data.not_enough_data_count },
-    { label: "Cost tied up (flagged)", value: inr(data.flagged_inventory_cost_tied_up) },
-  ];
-
   return (
-    <main className="mx-auto max-w-5xl p-8 space-y-8">
-      <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-semibold">StockRescue</h1>
-        <div className="flex gap-4 text-sm">
-          <Link href="/upload" className="underline">Upload CSV</Link>
-          <Link href="/experiments" className="underline">Experiments</Link>
-        </div>
-      </div>
-
-      <section className="grid grid-cols-2 gap-4 md:grid-cols-4">
-        {stats.map((s) => (
-          <div key={s.label} className="rounded-lg border p-4">
-            <div className="text-sm text-gray-500">{s.label}</div>
-            <div className="text-xl font-semibold">{s.value}</div>
-          </div>
-        ))}
+    <main className="mx-auto max-w-6xl px-5 pb-20 pt-12">
+      <section className="rise">
+        <p className="text-xs uppercase tracking-[0.25em] text-[var(--accent)]">Independent bookstores</p>
+        <h1 className="mt-3 max-w-3xl font-display text-5xl leading-[1.05] tracking-tight md:text-6xl">
+          Slow stock, <em className="text-[var(--accent)]">smarter</em> experiments.
+        </h1>
+        <p className="mt-4 max-w-xl text-[var(--muted)]">
+          Find what is sitting still, see the options worth testing before you discount, and measure what actually works.
+        </p>
+        {qloo !== null && (
+          <p className="mt-4 inline-flex items-center gap-2 rounded-full border border-[var(--line)] px-3 py-1 text-xs text-[var(--muted)]">
+            <span className={`h-2 w-2 rounded-full ${qloo ? "bg-emerald-600" : "bg-amber-500"}`} />
+            {qloo ? "Qloo connected" : "Qloo key not set: plans use store data only"}
+          </p>
+        )}
       </section>
 
-      <section>
-        <h2 className="mb-3 text-lg font-medium">Products needing attention</h2>
-        <div className="overflow-x-auto rounded-lg border">
-          <table className="w-full text-sm">
-            <thead className="bg-gray-50 text-left">
-              <tr>
-                <th className="p-3">Product</th>
-                <th className="p-3">Stock</th>
-                <th className="p-3">Cost tied up</th>
-                <th className="p-3">Why flagged</th>
-                <th className="p-3"></th>
-              </tr>
-            </thead>
-            <tbody>
+      {error && (
+        <div className="card mt-10 border-red-300 bg-red-50 p-5 text-sm">
+          <div className="font-medium">Could not load the dashboard</div>
+          <div className="mt-1 text-red-800">{error}</div>
+        </div>
+      )}
+
+      {!data && !error && (
+        <div className="mt-10 grid gap-4 md:grid-cols-4">
+          {[0, 1, 2, 3].map((i) => (
+            <div key={i} className="card h-32 animate-pulse" />
+          ))}
+        </div>
+      )}
+
+      {data && (
+        <>
+          <section className="mt-10 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            <Stat label="Products" value={String(data.total_products)} note={data.metric_descriptions.total_products} delay={100} />
+            <Stat label="Need attention" value={String(data.needs_attention_count)} note={data.metric_descriptions.needs_attention_count} delay={200} />
+            <Stat label="Cost tied up" value={money.format(data.total_inventory_cost_tied_up)} note={data.metric_descriptions.total_inventory_cost_tied_up} delay={300} />
+            <Stat label="Tied up in flagged stock" value={money.format(data.flagged_inventory_cost_tied_up)} note={data.metric_descriptions.flagged_inventory_cost_tied_up} delay={400} />
+          </section>
+
+          {data.not_enough_data_count > 0 && (
+            <p className="mt-4 text-sm text-[var(--muted)]">
+              {data.not_enough_data_count} products have no sales data. They are not judged as unpopular.
+            </p>
+          )}
+
+          <section className="mt-10 grid gap-3 md:grid-cols-3">
+            {Object.entries(data.rule_counts).map(([rule, n]) => (
+              <div key={rule} className="rounded-xl border border-[var(--line)] p-4">
+                <div className="flex items-baseline justify-between">
+                  <span className="font-medium">{RULE_LABEL[rule] ?? rule}</span>
+                  <span className="num font-display text-2xl">{n}</span>
+                </div>
+                <p className="mt-2 text-xs leading-relaxed text-[var(--muted)]">{data.rule_descriptions[rule]}</p>
+              </div>
+            ))}
+          </section>
+
+          <section className="mt-12">
+            <h2 className="font-display text-3xl tracking-tight">Start with these</h2>
+            <p className="mt-1 text-sm text-[var(--muted)]">Ranked by cost tied up, highest first.</p>
+            <div className="card mt-5 divide-y divide-[var(--line)] overflow-hidden">
               {data.products_needing_attention.map((p) => (
-                <tr key={p.product_pk} className="border-t align-top">
-                  <td className="p-3">
+                <div key={p.product_pk} className="flex flex-wrap items-center justify-between gap-3 p-4">
+                  <div className="min-w-0">
                     <div className="font-medium">{p.product_name}</div>
-                    <div className="text-gray-500">{p.sku}</div>
-                  </td>
-                  <td className="p-3">{p.quantity_in_stock}</td>
-                  <td className="p-3">{inr(p.inventory_cost_tied_up)}</td>
-                  <td className="p-3">
-                    {p.rules_triggered.map((r) => (
-                      <span key={r} className="mr-1 inline-block rounded bg-amber-100 px-2 py-0.5 text-xs">
-                        {RULE_LABELS[r] ?? r}
-                      </span>
-                    ))}
-                  </td>
-                  <td className="p-3 text-right">
-                    <Link href={`/rescue/${p.product_pk}`} className="rounded bg-black px-3 py-1.5 text-white">
-                      Rescue
+                    <div className="mt-1 flex flex-wrap gap-2 text-xs text-[var(--muted)]">
+                      <span>{p.sku}</span>
+                      <span>·</span>
+                      <span>{p.quantity_in_stock} in stock</span>
+                      {p.rules_triggered.map((r) => (
+                        <span key={r} className="rounded-full bg-[var(--paper)] px-2 py-0.5">
+                          {RULE_LABEL[r] ?? r}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-5">
+                    <span className="num font-display text-xl">{money.format(p.inventory_cost_tied_up)}</span>
+                    <Link
+                      href={`/rescue/${p.product_pk}`}
+                      className="rounded-full bg-[var(--ink)] px-4 py-2 text-sm text-[var(--paper)] transition hover:bg-[var(--accent)]"
+                    >
+                      Open Rescue Lab
                     </Link>
-                  </td>
-                </tr>
+                  </div>
+                </div>
               ))}
-            </tbody>
-          </table>
-        </div>
-      </section>
+            </div>
+          </section>
+        </>
+      )}
     </main>
   );
 }
