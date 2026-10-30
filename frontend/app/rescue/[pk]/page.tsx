@@ -3,86 +3,108 @@
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { Suspense, useEffect, useRef, useState } from "react";
+import PageShell from "@/components/PageShell";
 import { getRescuePlan } from "@/lib/api";
 import CreateExperimentButton from "@/components/CreateExperimentButton";
 import type { EvidenceSource, RescuePlan, Strategy } from "@/types/rescue";
 
-const SOURCE_STYLE: Record<EvidenceSource, { label: string; cls: string }> = {
-  qloo: { label: "Qloo", cls: "bg-purple-100 text-purple-800" },
-  retailer_data: { label: "Your data", cls: "bg-blue-100 text-blue-800" },
-  calculation: { label: "Calculated", cls: "bg-green-100 text-green-800" },
-  llm: { label: "AI", cls: "bg-pink-100 text-pink-800" },
-  assumption: { label: "Assumption", cls: "bg-gray-100 text-gray-700" },
+const SOURCE: Record<EvidenceSource, { label: string; cls: string }> = {
+  qloo: { label: "Qloo", cls: "border-violet-400/40 text-violet-300" },
+  retailer_data: { label: "Your data", cls: "border-sky-400/40 text-sky-300" },
+  calculation: { label: "Calculated", cls: "border-emerald-400/40 text-emerald-300" },
+  llm: { label: "AI", cls: "border-amber-400/40 text-amber-300" },
+  assumption: { label: "Assumption", cls: "border-neutral-600 text-neutral-400" },
 };
 
 const inr = (n: number) => `₹${n.toLocaleString("en-IN")}`;
 
+function Label({ children }: { children: React.ReactNode }) {
+  return <h4 className="text-xs uppercase tracking-widest text-neutral-500">{children}</h4>;
+}
+
 function StrategyCard({ s, planId }: { s: Strategy; planId: number | null }) {
   const e = s.economics;
-  return (
-    <article className="space-y-4 rounded-lg border p-5">
-      <header>
-        <div className="text-xs uppercase tracking-wide text-gray-500">
-          #{s.rank} · {s.type} · effort: {s.operational_effort}
-        </div>
-        <h3 className="text-lg font-semibold">{s.name}</h3>
-        <p className="text-sm text-gray-700">{s.summary}</p>
-      </header>
+  const stats: [string, string][] = [
+    ["Price", inr(e.selling_price)],
+    ["Margin", `${e.margin_pct}%`],
+    ["Discount", `${e.discount_pct}%`],
+    ["Test cost", inr(e.estimated_experiment_cost)],
+  ];
 
-      <dl className="grid grid-cols-2 gap-3 text-sm md:grid-cols-4">
-        <div><dt className="text-gray-500">Price</dt><dd>{inr(e.selling_price)}</dd></div>
-        <div><dt className="text-gray-500">Margin</dt><dd>{e.margin_pct}%</dd></div>
-        <div><dt className="text-gray-500">Discount</dt><dd>{e.discount_pct}%</dd></div>
-        <div><dt className="text-gray-500">Test cost</dt><dd>{inr(e.estimated_experiment_cost)}</dd></div>
+  return (
+    <article className="border border-neutral-800 p-6 md:p-8">
+      <div className="flex flex-wrap items-center gap-2 text-xs uppercase tracking-widest text-neutral-500">
+        <span className="text-emerald-400">Option {s.rank}</span>
+        <span>·</span>
+        <span>{s.type}</span>
+        <span>·</span>
+        <span>Effort: {s.operational_effort}</span>
+      </div>
+      <h3 className="font-display mt-3 text-xl tracking-tight md:text-2xl">{s.name}</h3>
+      <p className="mt-2 max-w-2xl text-neutral-400">{s.summary}</p>
+
+      <dl className="mt-6 grid grid-cols-2 gap-6 border-y border-neutral-800 py-5 md:grid-cols-4">
+        {stats.map(([k, v]) => (
+          <div key={k}>
+            <dt className="text-xs uppercase tracking-widest text-neutral-500">{k}</dt>
+            <dd className="num mt-1 text-lg">{v}</dd>
+          </div>
+        ))}
       </dl>
 
       {s.llm_explanation && (
-        <div className="rounded border-l-4 border-pink-400 bg-pink-50 p-3 text-sm">
-          <div className="mb-1 text-xs font-semibold uppercase text-pink-700">AI explanation</div>
-          {s.llm_explanation}
+        <div className="mt-6 border-l-2 border-amber-400/60 pl-4">
+          <div className="text-xs uppercase tracking-widest text-amber-300">AI explanation</div>
+          <p className="mt-1 text-neutral-300">{s.llm_explanation}</p>
         </div>
       )}
 
-      <div>
-        <h4 className="mb-1 text-sm font-medium">Evidence</h4>
-        <ul className="space-y-1 text-sm">
+      <div className="mt-6">
+        <Label>Evidence</Label>
+        <ul className="mt-3 space-y-2 text-sm">
           {s.evidence.map((ev, i) => (
-            <li key={i} className="flex gap-2">
-              <span className={`h-fit shrink-0 rounded px-2 py-0.5 text-xs ${SOURCE_STYLE[ev.source].cls}`}>
-                {SOURCE_STYLE[ev.source].label}
+            <li key={i} className="flex gap-3">
+              <span
+                className={`h-fit shrink-0 rounded-sm border px-2 py-0.5 text-xs ${SOURCE[ev.source].cls}`}
+              >
+                {SOURCE[ev.source].label}
               </span>
-              <span>{ev.note}</span>
+              <span className="text-neutral-300">{ev.note}</span>
             </li>
           ))}
         </ul>
       </div>
 
-      {s.assumptions.length > 0 && (
-        <div>
-          <h4 className="mb-1 text-sm font-medium">Assumptions</h4>
-          <ul className="list-disc pl-5 text-sm text-gray-700">
-            {s.assumptions.map((a, i) => <li key={i}>{a}</li>)}
-          </ul>
-        </div>
-      )}
-
-      {s.risks.length > 0 && (
-        <div>
-          <h4 className="mb-1 text-sm font-medium">Risks</h4>
-          <ul className="list-disc pl-5 text-sm text-gray-700">
-            {s.risks.map((r, i) => <li key={i}>{r}</li>)}
-          </ul>
-        </div>
-      )}
-
-      <div>
-        <h4 className="mb-1 text-sm font-medium">Test plan</h4>
-        <p className="text-sm text-gray-700">{s.test_plan}</p>
+      <div className="mt-6 grid gap-6 md:grid-cols-2">
+        {s.assumptions.length > 0 && (
+          <div>
+            <Label>Assumptions</Label>
+            <ul className="mt-3 list-disc space-y-1 pl-5 text-sm text-neutral-400">
+              {s.assumptions.map((a, i) => <li key={i}>{a}</li>)}
+            </ul>
+          </div>
+        )}
+        {s.risks.length > 0 && (
+          <div>
+            <Label>Risks</Label>
+            <ul className="mt-3 list-disc space-y-1 pl-5 text-sm text-neutral-400">
+              {s.risks.map((r, i) => <li key={i}>{r}</li>)}
+            </ul>
+          </div>
+        )}
       </div>
 
-      <p className="text-xs text-gray-500">{s.rank_reason.explanation}</p>
-      <p className="text-xs italic text-gray-500">{s.outcome_disclaimer}</p>
-      <CreateExperimentButton planId={planId} rank={s.rank} />
+      <div className="mt-6">
+        <Label>How to test it</Label>
+        <p className="mt-3 text-sm text-neutral-300">{s.test_plan}</p>
+      </div>
+
+      <p className="mt-6 text-xs text-neutral-500">{s.rank_reason.explanation}</p>
+      <p className="mt-1 text-xs italic text-neutral-600">{s.outcome_disclaimer}</p>
+
+      <div className="mt-6">
+        <CreateExperimentButton planId={planId} rank={s.rank} />
+      </div>
     </article>
   );
 }
@@ -102,57 +124,70 @@ function RescueContent() {
       .catch((e) => setError(e.message));
   }, [pk]);
 
-  return (
-    <main className="mx-auto max-w-4xl space-y-6 p-8">
-      <Link href="/" className="text-sm text-gray-500 underline">← Back to dashboard</Link>
+  const partial = plan ? Object.keys(plan.stages_failed).length > 0 : false;
 
-      {error && <p className="text-red-600">{error}</p>}
-      {!plan && !error && <p>Building rescue plan…</p>}
+  return (
+    <PageShell>
+      <Link href="/" className="text-sm text-neutral-400 hover:text-white">← Back to dashboard</Link>
+
+      {error && <p className="mt-8 text-red-400">{error}</p>}
+      {!plan && !error && <p className="mt-8 text-neutral-400">Building your rescue plan…</p>}
 
       {plan && (
-        <>
-          <h1 className="text-2xl font-semibold">{plan.product_name}</h1>
-          {planId !== null && <p className="text-xs text-gray-500">Plan #{planId}</p>}
+        <div className="mt-8 space-y-8">
+          <div>
+            <h1 className="font-display text-3xl tracking-tight md:text-4xl">{plan.product_name}</h1>
+            <p className="mt-3 text-neutral-400">
+              Ranked ways to move this product. Pick one and run it as a small experiment.
+            </p>
+            {planId !== null && <p className="mt-1 text-xs text-neutral-600">Plan #{planId}</p>}
+          </div>
 
           {plan.qloo_note && (
-            <div className="rounded border border-amber-300 bg-amber-50 p-3 text-sm">{plan.qloo_note}</div>
+            <div className="border border-amber-400/30 p-4 text-sm text-amber-200">{plan.qloo_note}</div>
           )}
 
-          {Object.keys(plan.stages_failed).length > 0 && (
-            <div className="rounded border border-red-200 bg-red-50 p-3 text-sm">
-              <div className="font-medium">This plan is partial.</div>
-              <div>{plan.limitations}</div>
+          {partial && (
+            <div className="border border-red-400/30 p-4 text-sm">
+              <div className="font-medium text-red-300">This plan is partial.</div>
+              <div className="mt-1 text-neutral-400">{plan.limitations}</div>
             </div>
           )}
 
-          <div className="space-y-5">
+          <div className="space-y-6">
             {plan.strategies.map((s) => <StrategyCard key={s.rank} s={s} planId={planId} />)}
           </div>
 
           {plan.rejected.length > 0 && (
             <section>
-              <h2 className="mb-2 text-lg font-medium">Options we ruled out</h2>
-              <ul className="space-y-2 text-sm">
+              <h2 className="font-display text-xl tracking-tight">Options we ruled out</h2>
+              <ul className="mt-4 divide-y divide-neutral-800 border-y border-neutral-800 text-sm">
                 {plan.rejected.map((r, i) => (
-                  <li key={i} className="rounded border p-3">
-                    <div className="font-medium">{r.name}</div>
-                    <div className="text-gray-600">{r.reasons.join(" ")}</div>
+                  <li key={i} className="py-4">
+                    <div>{r.name}</div>
+                    <div className="mt-1 text-neutral-500">{r.reasons.join(" ")}</div>
                   </li>
                 ))}
               </ul>
             </section>
           )}
 
-          <p className="text-xs text-gray-500">{plan.limitations}</p>
-        </>
+          {!partial && <p className="text-xs text-neutral-600">{plan.limitations}</p>}
+        </div>
       )}
-    </main>
+    </PageShell>
   );
 }
 
 export default function RescuePage() {
   return (
-    <Suspense fallback={<main className="p-8">Loading…</main>}>
+    <Suspense
+      fallback={
+        <PageShell>
+          <p className="text-neutral-400">Loading…</p>
+        </PageShell>
+      }
+    >
       <RescueContent />
     </Suspense>
   );
