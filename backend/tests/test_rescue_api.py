@@ -18,7 +18,7 @@ from app.agent.explanation import explain_plan  # noqa: E402
 from app.agent.workflow import QlooResolution  # noqa: E402
 from app.api import rescue  # noqa: E402
 from app.db.session import get_db  # noqa: E402
-from app.models import RescueExperiment  # noqa: E402
+from app.models import QlooEvidence, RescueExperiment  # noqa: E402
 from app.schemas.rescue import QlooStatus, RescuePlan  # noqa: E402
 from app.services.matcher_service import QlooRelatedEntity  # noqa: E402
 from p2_helpers import add_product  # noqa: E402
@@ -229,6 +229,11 @@ def test_unknown_plan_is_404(make_client, shop):
 
 
 def test_experiment_hand_off_creates_a_proposed_experiment(make_client, shop, db):
+    # The gateway double references this saved provider-evidence record.
+    db.add(QlooEvidence(id=41, product_pk=shop["target"], kind="insights",
+                        request_path="/v2/insights", request_params={"filter.type": "urn:entity:book"},
+                        response_json={"results": {"entities": []}}, from_cache=False))
+    db.commit()
     client = make_client(Gateway(entities=(shop["entity"],)))
     r = client.post(f"/rescue/{shop['target']}")
     plan = RescuePlan.model_validate(r.json())

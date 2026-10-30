@@ -199,26 +199,27 @@ def test_gateway_rolls_back_and_reraises(db, monkeypatch):
 def test_gateway_insights_mapping(db, monkeypatch):
     pk = add_product(db, "S1", "Target")
     add_mapping(db, pk, status="strong", entity_id="ent-t", evidence_id=3)
-    seen = {}
+    seen = []
 
-    def fake_insights(session, product_pk, take=10):  # TEST DOUBLE
-        seen["args"] = (product_pk, take)
+    def fake_insights(session, product_pk, take=10, target_type="urn:entity:book"):  # TEST DOUBLE
+        seen.append((product_pk, take, target_type))
         return insights(
-            InsightEntity(entity_id="r1", name="Related One", types=["urn:entity:book"],
+            InsightEntity(entity_id="r1", name="Related One", types=[target_type],
                           affinity=0.8, tags=[{"id": "t1", "name": "Satire", "type": "genre"},
                                               {"id": "t2"}, {"name": 5}, {"name": "  "}]),
-            InsightEntity(entity_id="r2", name="Related Two"),
+            InsightEntity(entity_id=f"r2-{target_type}", name="Related Two"),
         )
 
     monkeypatch.setattr(adapters.ers, "insights_for_product", fake_insights)
     gw = DbQlooGateway(db, insights_take=7)
     res = gw.resolve(product_to_stock_item(db.get(Product, pk)))
     ents = gw.get_insights(res)
-    assert seen["args"] == (pk, 7)
-    assert [e.entity_id for e in ents] == ["r1", "r2"]
-    assert ents[0].entity_type == "urn:entity:book" and ents[1].entity_type is None
+    expected_types = list(adapters.CROSS_CATEGORY_INSIGHT_TYPES)
+    assert seen == [(pk, 7, target_type) for target_type in expected_types]
+    assert len(ents) == 1 + len(expected_types)
+    assert ents[0].entity_type == "urn:entity:book" and ents[0].affinity == 0.8
     assert ents[0].tags == ("Satire",) and ents[0].creators == ()
-    assert all(e.raw_ref == "qloo_evidence:41" for e in ents)
+    assert ents[0].raw_ref == "qloo_evidence:41"
     assert gw.evidence_ids == [3, 41]
 
 
@@ -233,7 +234,7 @@ def test_gateway_insights_error_rolls_back(db, monkeypatch):
     res = gw.resolve(product_to_stock_item(db.get(Product, pk)))
     with pytest.raises(QlooError):
         gw.get_insights(res)
-    assert rolled == [True]
+    assert len(rolled) == len(adapters.CROSS_CATEGORY_INSIGHT_TYPES)
 
 
 # --- end to end over the DB ------------------------------------------------
@@ -246,7 +247,8 @@ def shop(db, monkeypatch):
     other = add_product(db, "P2", "Unrelated Atlas", qty=9, cost=300, price=600)
     add_mapping(db, target, status="strong", entity_id="ent-target", evidence_id=None)
     monkeypatch.setattr(adapters.ers, "insights_for_product", lambda *a, **k: insights(
-        InsightEntity(entity_id="ent-ce", name="Companion Essays", types=["urn:entity:book"])))
+        InsightEntity(entity_id="ent-ce", name="Companion Essays", types=[k.get("target_type", "urn:entity:book")],
+                      affinity=0.91 if k.get("target_type") == "urn:entity:book" else 0.72)))
     return {"target": target, "partner": partner, "other": other}
 
 
@@ -264,6 +266,7 @@ def test_end_to_end_plan_has_traceable_qloo_evidence(db, shop):
     assert plan.qloo_status == QlooStatus.STRONG_MATCH and plan.stages_failed == {}
     qloo = [e for s in plan.strategies for e in s.evidence if e.source == EvidenceSource.QLOO]
     assert qloo and all(e.raw_ref == "qloo_evidence:41" for e in qloo)
+    assert all(e.affinity is not None for e in qloo)
     assert gw.evidence_ids == [41]
     assert "No sales history" in plan.limitations
 

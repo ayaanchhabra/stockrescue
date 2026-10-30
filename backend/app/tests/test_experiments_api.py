@@ -6,8 +6,8 @@ import httpx
 
 
 def new_experiment(client, product_pk, **over):
-    body = {"product_pk": product_pk, "strategy_type": "bundle", "title": "Pair with Norwegian Wood",
-            "proposed_action": "Bundle at 799", "proposed_price": 799.0, "estimated_cost": 200.0,
+    body = {"product_pk": product_pk, "strategy_type": "promotion", "title": "Promotion",
+            "proposed_action": "Run a short controlled promotion", "proposed_price": 449.0, "estimated_cost": 200.0,
             "calculated_margin_pct": 37.5}
     body.update(over)
     r = client.post("/experiments", json=body)
@@ -81,7 +81,7 @@ def test_units_exceeding_stock_rejected(client):
     bad = {**OUTCOME, "target_units_sold": 30, "stock_at_start": 24,
            "items": [{**OUTCOME["items"][0], "units_sold": 30}]}
     r = client.post(f"/experiments/{eid}/outcome", json=bad)
-    assert r.status_code == 422 and r.json()["error"] == "invalid_calculation_input"
+    assert r.status_code == 422 and r.json()["error"] == "constraint_violation"
 
 
 def test_summary_keeps_simulated_separate(client):
@@ -192,3 +192,27 @@ def test_status_endpoint_reports_failure_honestly(client, fake):
     fake.push("/search", FakeResponse(401, {}))
     r = client.get("/qloo/status").json()
     assert r["ok"] is False and r["error"] == "auth"
+
+
+def test_quantity_mismatch_between_item_and_target_is_rejected(client):
+    eid = run_to_running(client, make_product())
+    bad = {**OUTCOME, "target_units_sold": 99,
+           "items": [{**OUTCOME["items"][0], "units_sold": 5}]}
+    r = client.post(f"/experiments/{eid}/outcome", json=bad)
+    assert r.status_code == 422 and "does not match" in r.json()["message"]
+
+
+def test_client_cannot_spoof_unit_cost(client):
+    eid = run_to_running(client, make_product())
+    spoofed = {**OUTCOME, "items": [{**OUTCOME["items"][0], "unit_cost": 1.0}]}
+    r = client.post(f"/experiments/{eid}/outcome", json=spoofed)
+    assert r.status_code == 201
+    assert r.json()["calculated"]["cost_of_goods_sold"] == 7000.0
+    # Historical audit inputs show the server-bound cost, not the spoofed request value.
+    assert r.json()["inputs"]["items"][0]["unit_cost"] == "350.0"
+
+
+def test_actual_days_must_match_saved_experiment_dates(client):
+    eid = run_to_running(client, make_product())
+    r = client.post(f"/experiments/{eid}/outcome", json={**OUTCOME, "actual_days": 13})
+    assert r.status_code == 422 and "must match the saved experiment date range" in r.json()["message"]

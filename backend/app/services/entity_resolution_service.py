@@ -99,7 +99,9 @@ def reject_mapping(db: Session, product_pk: int) -> QlooEntityMapping:
 
 def insights_for_product(db: Session, product_pk: int, take: int = 10,
                          target_type: str = qloo_service.BOOK) -> tuple[int, InsightsResult]:
-    """Returns (evidence_id, result). Only runs on a strong or human-confirmed match."""
+    """Returns (evidence_id, result) for one allowlisted Qloo category."""
+    if isinstance(take, bool) or not isinstance(take, int) or not 1 <= take <= 30:
+        raise ValueError("take must be an integer between 1 and 30")
     _product(db, product_pk)
     m = get_mapping(db, product_pk)
     usable = (m is not None and m.qloo_entity_id is not None and m.verification_status != "rejected"
@@ -107,8 +109,8 @@ def insights_for_product(db: Session, product_pk: int, take: int = 10,
     if not usable:
         raise NeedsResolution("No usable Qloo entity for this product: resolve it and confirm a match first")
 
-    # Ask for a few extra: Qloo can return other editions of the same book, which we drop below.
-    result = qloo_service.get_insights(m.qloo_entity_id, target_type=target_type, take=take + 3,
+    # Request a few extra because book queries can return alternate editions.
+    result = qloo_service.get_insights(m.qloo_entity_id, target_type=target_type, take=min(take + 3, 30),
                                        exclude_entity_ids=[m.qloo_entity_id])
     same_title = qloo_service.norm_title(m.matched_name or "")
     kept = [e for e in result.entities if qloo_service.norm_title(e.name) != same_title]

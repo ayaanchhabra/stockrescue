@@ -1,46 +1,94 @@
-"""Run FIRST:  python qloo_smoke_test.py   (needs QLOO_API_KEY in the environment)
-Prints raw Qloo responses so we can confirm real field names, and shows which bookstore
-titles resolve. Share the output with the team (and Person 4 for the sample dataset)."""
-import json
+"""Sanitized live Qloo smoke test.
+
+Run with QLOO_API_KEY set in the environment. It makes one entity-search call
+and two small cross-category Insights calls (movie + artist). It never prints
+credentials, headers, full raw payloads, or request URLs containing secrets.
+"""
+from __future__ import annotations
+
 import os
 import sys
+from typing import Any
 
 import httpx
 
-BASE = os.getenv("QLOO_BASE_URL", "https://hackathon.api.qloo.com")
+BASE = os.getenv("QLOO_BASE_URL", "https://hackathon.api.qloo.com").rstrip("/")
 KEY = os.environ.get("QLOO_API_KEY")
-if not KEY:
-    sys.exit("Set QLOO_API_KEY first")
-H = {"X-Api-Key": KEY}
-
-TITLES = ["The God of Small Things", "Norwegian Wood", "1984", "The Alchemist",
-          "Kafka on the Shore", "Sapiens", "The Great Gatsby", "Pride and Prejudice"]
+TIMEOUT = 20.0
 
 
-def call(path, **params):
-    r = httpx.get(BASE + path, headers=H, params=params, timeout=20)
-    print(f"\n{r.status_code}  {r.request.url}")
-    return r
+def call(path: str, params: dict[str, Any]) -> tuple[int, dict[str, Any] | None]:
+    response = httpx.get(
+        BASE + path,
+        headers={"X-Api-Key": KEY or ""},
+        params=params,
+        timeout=TIMEOUT,
+    )
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = None
+    return response.status_code, payload if isinstance(payload, dict) else None
 
 
-def results_of(data):
-    res = data.get("results", []) if isinstance(data, dict) else data
-    return res.get("entities", []) if isinstance(res, dict) else res
+def entities(payload: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not payload:
+        return []
+    results = payload.get("results", [])
+    if isinstance(results, dict):
+        results = results.get("entities", [])
+    return [item for item in results if isinstance(item, dict)] if isinstance(results, list) else []
 
 
-r = call("/search", query=TITLES[0], types="urn:entity:book", take=5)
-print(r.text[:2500])
+def main() -> int:
+    if not KEY:
+        print("QLOO_API_KEY is not configured; live check was not run.")
+        return 2
 
-first_id = None
-print("\n=== Resolve check ===")
-for t in TITLES:
-    r = call("/search", query=t, types="urn:entity:book", take=3)
-    items = results_of(r.json()) if r.status_code == 200 else []
-    print(f"  {t!r} -> {[x.get('name') for x in items]}")
-    if items and first_id is None:
-        first_id = items[0].get("entity_id") or items[0].get("id")
+    try:
+        search_status, search_payload = call(
+            "/search", {"query": "1984", "types": "urn:entity:book", "take": 3}
+        )
+        search_items = entities(search_payload)
+        print(f"SEARCH /search: HTTP {search_status}; result_count={len(search_items)}")
+        if search_status != 200:
+            return 1
+        if not search_items:
+            print("Search succeeded but returned no book entity; Insights checks skipped.")
+            return 0
 
-if first_id:
-    print("\n=== Insights check (raw) ===")
-    r = call("/v2/insights", **{"filter.type": "urn:entity:book", "signal.interests.entities": first_id, "take": 5})
-    print(json.dumps(r.json(), indent=2)[:3500] if r.status_code == 200 else r.text[:500])
+        first = search_items[0]
+        entity_id = first.get("entity_id") or first.get("id")
+        if not entity_id:
+            print("Search response has no entity_id/id; response contract check failed.")
+            return 1
+        print("Search entity fields:", ", ".join(sorted(first.keys())))
+
+        for target_type in ("urn:entity:movie", "urn:entity:artist"):
+            status, payload = call("/v2/insights", {
+                "filter.type": target_type,
+                "signal.interests.entities": str(entity_id),
+                "take": 2,
+                "feature.explainability": "true",
+            })
+            items = entities(payload)
+            print(f"INSIGHTS {target_type}: HTTP {status}; result_count={len(items)}")
+            if status != 200:
+                return 1
+            if items:
+                first_result = items[0]
+                query = first_result.get("query")
+                print("Insights entity fields:", ", ".join(sorted(first_result.keys())))
+                print("Qloo affinity returned:", isinstance(query, dict) and "affinity" in query)
+        print("LIVE QLOO CHECK PASSED (HTTP responses verified; no credentials or raw payloads printed).")
+        return 0
+    except httpx.TimeoutException:
+        print("Live Qloo check failed: request timed out.")
+        return 1
+    except httpx.HTTPError as exc:
+        print(f"Live Qloo check failed: network error ({type(exc).__name__}).")
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

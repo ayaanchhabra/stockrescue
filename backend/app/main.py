@@ -4,9 +4,10 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from sqlalchemy import inspect, text
 
 from app import models  # noqa: F401  (registers tables)
-from app.api import experiments, health, qloo , rescue , inventory
+from app.api import experiments, health, inventory, qloo, rescue
 from app.config import settings
 from app.db.session import Base, engine
 from app.errors import (ConstraintViolation, DuplicateExperiment, InvalidTransition,
@@ -21,6 +22,15 @@ log = logging.getLogger("stockrescue")
 async def lifespan(_: FastAPI):
     # Hackathon shortcut. Replace with Alembic migrations before production use.
     Base.metadata.create_all(bind=engine)
+    # Compatibility patch for installations created before the experiment
+    # accounting snapshot field was introduced. New databases get it from
+    # metadata; old SQLite/PostgreSQL databases are upgraded without data loss.
+    inspector = inspect(engine)
+    if "rescue_experiments" in inspector.get_table_names():
+        columns = {column["name"] for column in inspector.get_columns("rescue_experiments")}
+        if "product_snapshot" not in columns:
+            with engine.begin() as connection:
+                connection.execute(text("ALTER TABLE rescue_experiments ADD COLUMN product_snapshot JSON"))
     yield
 
 
