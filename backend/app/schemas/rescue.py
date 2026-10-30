@@ -62,6 +62,7 @@ class Evidence(_Base):
     entity_id: Optional[str] = Field(None, description="Qloo entity id, if source=qloo.")
     entity_name: Optional[str] = None
     entity_type: Optional[str] = None
+    affinity: Optional[float] = Field(None, description="Qloo query.affinity, only when returned by Qloo.")
     raw_ref: Optional[str] = Field(
         None,
         description="Pointer to the stored raw Qloo response (provenance).",

@@ -36,7 +36,7 @@ def test_feasible_bundle_passes_and_reports_metrics():
     assert r.passed and r.violations == ()
     assert r.metrics["unit_cost"] == 550
     assert r.metrics["margin_pct"] == 31.25
-    assert r.metrics["discount_pct"] == 11.11
+    assert r.metrics["discount_pct"] == 11.11  # display value; threshold used full precision
     assert r.metrics["units_available"] == 5
 
 
@@ -253,3 +253,24 @@ def test_stock_exactly_equal_to_the_test_size_is_enough():
     ok = ProductRef("L2", "Just Enough", quantity=3, unit_cost=350, selling_price=500)
     r = check_candidate(CandidateStrategy(REPOSITION, "Display", (ok,), 500, 0, 3), RULES)
     assert r.passed
+
+
+@pytest.mark.parametrize("margin,should_pass", [(14.999, False), (15.0, True), (15.001, True)])
+def test_min_margin_boundary_uses_unrounded_decimal(margin, should_pass):
+    # Choose price 100 and derive cost so the true margin is the stated value.
+    cost = 100.0 * (1.0 - margin / 100.0)
+    product = ProductRef("EDGE", "Boundary", 10, unit_cost=cost, selling_price=100)
+    result = check_candidate(CandidateStrategy(PROMOTION, "Boundary", (product,), 100, 0, 1), RULES)
+    assert result.passed is should_pass
+
+
+def test_margin_that_displays_as_15_percent_but_is_below_it_is_rejected():
+    product = ProductRef("EDGE", "Precision", 10, unit_cost=85.004, selling_price=100)
+    result = check_candidate(CandidateStrategy(PROMOTION, "Precision", (product,), 100, 0, 1), RULES)
+    assert not result.passed and cs.BELOW_MIN_MARGIN in result.codes
+    assert result.metrics["margin_pct"] == 15.0  # display rounded; raw decision rejected
+
+
+def test_unknown_strategy_fails_closed():
+    result = check_candidate(CandidateStrategy("other", "Legacy", (SLOW,), 500, 0, 1), RULES)
+    assert not result.passed and cs.INVALID_PLAN in result.codes

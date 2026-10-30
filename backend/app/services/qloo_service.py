@@ -1,10 +1,10 @@
 """Thin, defensive client for the Qloo API.
 
-Verified against the real API with our own key (2026-10-26): base URL
-https://hackathon.api.qloo.com, header X-Api-Key, GET /search (results[]: name, entity_id,
-types, popularity, disambiguation, tags, properties) and GET /v2/insights
-(results.entities[]: name, entity_id, type, subtype, popularity, tags, query.affinity, properties).
-Book entities have NO author field; popular titles return several same-name editions.
+The repository records a successful live API check on 2026-10-26 using
+https://hackathon.api.qloo.com and the X-Api-Key header. Re-run
+backend/qloo_smoke_test.py from a network-enabled environment to verify the
+current event credential and response contract. Book entities may omit author
+metadata; popular titles can return several same-name editions.
 """
 from __future__ import annotations
 import html
@@ -12,6 +12,7 @@ import json
 import logging
 import re
 import time
+from collections import OrderedDict
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from typing import Any
@@ -24,6 +25,14 @@ from app.schemas.qloo import (InsightEntity, InsightsResult, MatchStatus,
 
 log = logging.getLogger(__name__)
 BOOK = "urn:entity:book"
+# Qloo's current Insights API `filter.type` enum. Keep this allowlist focused
+# on cultural entities relevant to a bookstore workflow; do not send arbitrary
+# client-provided entity types to the provider.
+SUPPORTED_INSIGHT_TYPES = frozenset({
+    "urn:entity:book", "urn:entity:artist", "urn:entity:brand",
+    "urn:entity:movie", "urn:entity:podcast", "urn:entity:tv_show",
+    "urn:entity:videogame",
+})
 MAX_ATTEMPTS = 3
 
 
@@ -37,11 +46,26 @@ class QlooError(Exception):
 
 
 # ---------------- low-level HTTP: timeout, retry, cache ----------------
-_cache: dict[str, tuple[float, Any]] = {}
+MAX_CACHE_ENTRIES = 512
+_cache: OrderedDict[str, tuple[float, Any]] = OrderedDict()
 
 
 def clear_cache() -> None:
     _cache.clear()
+
+
+def _cache_store(key: str, data: Any) -> None:
+    now = time.time()
+    ttl = max(0, int(settings.qloo_cache_ttl_seconds))
+    # Opportunistically purge all expired entries so stale keys cannot occupy
+    # the bounded cache indefinitely.
+    for cache_key, (cached_at, _) in list(_cache.items()):
+        if now - cached_at >= ttl:
+            _cache.pop(cache_key, None)
+    _cache[key] = (now, data)
+    _cache.move_to_end(key)
+    while len(_cache) > MAX_CACHE_ENTRIES:
+        _cache.popitem(last=False)
 
 
 def _request(path: str, params: dict) -> tuple[Any, bool]:
@@ -52,7 +76,10 @@ def _request(path: str, params: dict) -> tuple[Any, bool]:
     key = path + "?" + json.dumps(params, sort_keys=True, default=str)
     hit = _cache.get(key)
     if hit and time.time() - hit[0] < settings.qloo_cache_ttl_seconds:
+        _cache.move_to_end(key)
         return hit[1], True
+    if hit:
+        _cache.pop(key, None)
 
     last: QlooError | None = None
     for attempt in range(MAX_ATTEMPTS):
@@ -75,7 +102,7 @@ def _request(path: str, params: dict) -> tuple[Any, bool]:
                     data = r.json()
                 except ValueError:
                     raise QlooError("Qloo returned non-JSON", kind="bad_response", status_code=code)
-                _cache[key] = (time.time(), data)
+                _cache_store(key, data)
                 return data, False
             if code in (401, 403):
                 raise QlooError("Qloo rejected the API key", kind="auth", status_code=code)
@@ -278,6 +305,10 @@ def resolve(product_name: str, creator: str | None = None,
 
 def get_insights(entity_id: str, target_type: str = BOOK, take: int = 10,
                  exclude_entity_ids: list[str] | None = None) -> InsightsResult:
+    if target_type not in SUPPORTED_INSIGHT_TYPES:
+        raise QlooError(f"Unsupported Insights target type: {target_type}", kind="bad_response")
+    if not entity_id or not 1 <= take <= 30:
+        raise QlooError("Insights requires an entity id and take between 1 and 30", kind="bad_response")
     params: dict[str, Any] = {
         "filter.type": target_type,
         "signal.interests.entities": entity_id,

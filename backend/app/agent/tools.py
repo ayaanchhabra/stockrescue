@@ -149,7 +149,8 @@ def get_qloo_insights(db: Session, product_id: str):
     ents = gw.get_insights(res)
     return {"status": res.status.value,
             "entities": [{"entity_id": e.entity_id, "name": e.name, "entity_type": e.entity_type,
-                          "tags": list(e.tags), "raw_ref": e.raw_ref} for e in ents]}
+                          "tags": list(e.tags), "qloo_affinity": e.affinity,
+                          "raw_ref": e.raw_ref} for e in ents]}
 
 
 @_tool("find_available_inventory_candidates",
@@ -163,6 +164,7 @@ def find_available_inventory_candidates(db: Session, product_id: str):
     matches = match_candidates(ents, req.stock, [req.target.product.product_id])
     return [{"product_id": m.product.product_id, "name": m.product.name, "match_kind": m.match_kind,
              "qloo_entity_id": m.entity.entity_id, "qloo_entity_name": m.entity.name,
+             "qloo_affinity": m.entity.affinity,
              "reason": m.reason, "in_stock": m.product.quantity} for m in matches]
 
 

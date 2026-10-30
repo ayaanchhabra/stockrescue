@@ -27,8 +27,8 @@ def shop(db, monkeypatch):
     p = add_product(db, "P1", "Companion Essays", qty=6, cost=200, price=400)
     add_mapping(db, t, status="strong", entity_id="ent-t")
 
-    def fake_insights(session, pk, take=10):  # TEST DOUBLE
-        return 41, InsightsResult(source_entity_id="ent-t", target_type="urn:entity:book",
+    def fake_insights(session, pk, take=10, target_type="urn:entity:book"):  # TEST DOUBLE
+        return 41, InsightsResult(source_entity_id="ent-t", target_type=target_type,
                                   request_params={}, fetched_at="x",
                                   entities=[InsightEntity(entity_id="ent-ce", name="Companion Essays")])
 

@@ -115,10 +115,13 @@ def _qloo_evidence(target: ProductRef, links: Sequence[CandidateMatch]) -> List[
                     f"'{target.name}'. Our own matching linked it to the stocked title "
                     f"'{m.product.name}' ({_KIND_LABEL.get(m.match_kind, m.match_kind)} match): "
                     f"{m.reason}"
+                    + (f" Qloo-reported affinity: {m.entity.affinity:.4f}." if m.entity.affinity is not None
+                       else " Qloo did not return an affinity value for this result.")
                 ),
                 entity_id=m.entity.entity_id,
                 entity_name=m.entity.name,
                 entity_type=m.entity.entity_type,
+                affinity=m.entity.affinity,
                 raw_ref=m.entity.raw_ref,
             )
         )

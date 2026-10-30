@@ -35,6 +35,7 @@ from app.models import RescuePlan as RescuePlanRow
 from app.schemas.experiments import ExperimentCreate
 from app.schemas.rescue import EvidenceSource, QlooStatus, RescuePlan, Strategy
 from app.services import entity_resolution_service as ers
+from app.services.qloo_service import QlooError
 from app.services.constraints_service import ProductRef
 from app.services.matcher_service import QlooRelatedEntity, StockItem
 
@@ -44,6 +45,14 @@ log = logging.getLogger(__name__)
 
 EVIDENCE_PREFIX = "qloo_evidence:"
 MAX_ALTERNATIVES = 5
+# Keep each rescue run bounded while genuinely exploring beyond books.
+CROSS_CATEGORY_INSIGHT_TYPES = (
+    "urn:entity:book",
+    "urn:entity:movie",
+    "urn:entity:artist",
+    "urn:entity:tv_show",
+    "urn:entity:videogame",
+)
 HUMAN_DECISIONS = ("confirmed", "rejected")  # verification_status values set by a person
 
 NOTE_REJECTED = (
@@ -183,11 +192,16 @@ class DbQlooGateway:
     records the stage failure and marks Qloo as unavailable.
     """
 
-    def __init__(self, db: Session, *, refresh: bool = False, insights_take: int = 10) -> None:
+    def __init__(self, db: Session, *, refresh: bool = False, insights_take: int = 10,
+                 insight_target_types: Sequence[str] = CROSS_CATEGORY_INSIGHT_TYPES) -> None:
         self.db = db
         self.refresh = refresh
         self.insights_take = insights_take
+        self.insight_target_types = tuple(dict.fromkeys(insight_target_types))
+        if not self.insight_target_types or len(self.insight_target_types) > 7:
+            raise ValueError("insight_target_types must contain between 1 and 7 categories")
         self.evidence_ids: List[int] = []
+        self.category_failures: Dict[str, str] = {}
         self._pk: Optional[int] = None
 
     def _note_evidence(self, evidence_id: Optional[int]) -> None:
@@ -211,28 +225,45 @@ class DbQlooGateway:
     def get_insights(self, resolution: QlooResolution) -> Tuple[QlooRelatedEntity, ...]:
         if self._pk is None:
             raise RuntimeError("resolve() must run before get_insights()")
-        try:
-            evidence_id, result = ers.insights_for_product(self.db, self._pk, take=self.insights_take)
-        except Exception:
-            self.db.rollback()
-            raise
-        self._note_evidence(evidence_id)
-        ref = _ref(evidence_id)
         out: List[QlooRelatedEntity] = []
-        for e in result.entities:
-            tags = tuple(
-                t["name"].strip() for t in e.tags
-                if isinstance(t, dict) and isinstance(t.get("name"), str) and t["name"].strip()
-            )
-            out.append(QlooRelatedEntity(
-                entity_id=e.entity_id,
-                name=e.name,
-                entity_type=e.types[0] if e.types else None,
-                creators=(),  # Qloo book entities carry no author field
-                tags=tags,
-                raw_ref=ref,
-            ))
-        return tuple(out)
+        successes = 0
+        for target_type in self.insight_target_types:
+            try:
+                evidence_id, result = ers.insights_for_product(
+                    self.db, self._pk, take=self.insights_take, target_type=target_type
+                )
+            except Exception as exc:
+                # A missing category/temporary provider error must not discard
+                # successful evidence from the other supported categories.
+                self.db.rollback()
+                self.category_failures[target_type] = f"{type(exc).__name__}: {str(exc)[:160]}"
+                log.warning("Qloo Insights category %s failed: %s", target_type, type(exc).__name__)
+                continue
+            successes += 1
+            self._note_evidence(evidence_id)
+            ref = _ref(evidence_id)
+            for e in result.entities:
+                tags = tuple(
+                    t["name"].strip() for t in e.tags
+                    if isinstance(t, dict) and isinstance(t.get("name"), str) and t["name"].strip()
+                )
+                out.append(QlooRelatedEntity(
+                    entity_id=e.entity_id,
+                    name=e.name,
+                    entity_type=e.types[0] if e.types else target_type,
+                    creators=(),  # Qloo book entities do not reliably carry creator fields
+                    tags=tags,
+                    raw_ref=ref,
+                    affinity=e.affinity,
+                ))
+        if successes == 0 and self.category_failures:
+            raise QlooError("Qloo Insights failed for every configured target category", kind="upstream")
+        # Deduplicate provider entity IDs while retaining first-seen category order.
+        unique: Dict[str, QlooRelatedEntity] = {}
+        for entity in out:
+            unique.setdefault(entity.entity_id, entity)
+        return tuple(unique.values())
+
 
 
 # ---------------------------------------------------------------------------

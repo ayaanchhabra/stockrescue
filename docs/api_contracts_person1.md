@@ -31,10 +31,12 @@ from app.services import entity_resolution_service as ers
 from app.services.qloo_service import QlooError
 from app.errors import NeedsResolution
 
-mapping = ers.resolve_product(db, product_pk)                      # QlooEntityMapping, stores raw evidence
-evidence_id, result = ers.insights_for_product(db, product_pk, take=10)   # InsightsResult
+mapping = ers.resolve_product(db, product_pk)  # QlooEntityMapping; stores raw evidence
+evidence_id, result = ers.insights_for_product(
+    db, product_pk, take=10, target_type="urn:entity:movie"
+)  # InsightsResult for one target category
 ```
-Catch `QlooError` (`e.kind`) and `NeedsResolution`; continue with retailer data and label the Qloo coverage gap.
+Catch `QlooError` (`e.kind`) and `NeedsResolution`; continue with retailer data and label the Qloo coverage gap. The rescue gateway makes a bounded set of cross-category Insights requests (book, movie, artist, TV show and video game). These categories are allowlisted against Qloo's current Insights `filter.type` enum. Qloo's `query.affinity` is carried separately from internal product-match/ranking scores and remains null when the provider omits it. A result can inspire a display theme, but it is only eligible as a bundle partner when it matches a real stocked product.
 
 ## Qloo endpoints
 
@@ -81,10 +83,10 @@ Status flow: `proposed -> approved -> running -> completed`. Also `proposed -> r
 | GET | /experiments/{id}/outcome | | stored outcome, 404 if none |
 | GET | /experiments/summary | | counts and totals |
 
-**Create body:** `plan_id?, product_pk, strategy_type ("bundle"|"reposition"|"promotion"|"other"), title, proposed_action, bundle_product_pks[], proposed_price? (>0), estimated_cost (>=0), calculated_margin_pct?, qloo_evidence_ids[]`.
-`calculated_margin_pct` is supplied by the economics service; this backend does not recalculate it.
+**Create body:** `plan_id?, product_pk, strategy_type ("bundle"|"reposition"|"promotion"), title, proposed_action, bundle_product_pks[], proposed_price (>0), estimated_cost (>=0), calculated_margin_pct?, qloo_evidence_ids[]`.
+`other` is intentionally unsupported and returns request validation 422; the service-level guard also fails closed for unknown strategy types. `calculated_margin_pct` is ignored and recomputed by the backend. Hard margin, discount and budget checks use unrounded Decimal values; rounding is only for response/display metrics. When `plan_id` is supplied, the backend verifies that target product, retailer, exact strategy, bundle partners and Qloo evidence all belong to that saved plan/strategy. Evidence rows must exist and belong to the target product.
 
-**Outcome body:** `is_simulated, items[{product_id, units_sold, actual_selling_price (net of discount), unit_cost}], additional_costs, target_units_sold, actual_days, baseline_units?, baseline_days? (both or neither), stock_at_start?, control?{baseline_units, baseline_days, experiment_units, experiment_days}, notes?`.
+**Outcome body:** `is_simulated, items[{sku, units_sold, actual_selling_price (net of discount), unit_cost?}], additional_costs, target_units_sold?, actual_days, baseline_units?, baseline_days? (both or neither), stock_at_start?, control?{baseline_units, baseline_days, experiment_units, experiment_days}, notes?`. `product_id` remains accepted as a backwards-compatible alias for `sku`; it always means the retailer SKU, not a database PK. `unit_cost` is deprecated/untrusted and ignored. The backend requires the outcome SKUs to exactly match the experiment's saved product snapshot, uses snapshot costs and starting stock, derives target units from the target SKU row, and rejects duplicate/unrelated/missing SKUs, mismatched target quantities, over-stock sales and unequal component quantities for bundles. `target_units_sold` and `stock_at_start` are optional consistency assertions, not sources of truth. `actual_days` must match the saved inclusive start/end date range.
 
 **Outcome result:** `id, experiment_id, is_simulated, inputs, calculated, limitations[], notes, recorded_at`.
 `calculated`: `revenue, cost_of_goods_sold, additional_direct_campaign_costs, gross_profit_before_campaign_costs, gross_profit, gross_margin_pct (null if no revenue), target_units_sold, inventory_remaining, baseline_comparison{available, baseline_units_per_day, experiment_units_per_day, expected_units_at_baseline_rate, units_above_baseline_rate, sales_change_pct (null if baseline rate is 0), note?}, control_comparison{available, control_sales_change_pct?, difference_vs_control_pct_points?}, accounting_basis, limitations`.

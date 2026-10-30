@@ -94,10 +94,12 @@ class RescueExperiment(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     plan_id: Mapped[int | None] = mapped_column(ForeignKey("rescue_plans.id"), nullable=True, index=True)
     product_pk: Mapped[int] = mapped_column(ForeignKey("products.id"), index=True)  # target slow mover
-    strategy_type: Mapped[str] = mapped_column(String(30))  # bundle | reposition | promotion | other
+    strategy_type: Mapped[str] = mapped_column(String(30))  # bundle | reposition | promotion (unsupported values rejected at the API/service boundary)
     title: Mapped[str] = mapped_column(String(200))
     proposed_action: Mapped[str] = mapped_column(Text)
     bundle_product_pks: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    # Target + partner SKU/cost/stock snapshot (refreshed when the experiment starts).
+    product_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     proposed_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     estimated_cost: Mapped[float] = mapped_column(Float, default=0.0)
     calculated_margin_pct: Mapped[float | None] = mapped_column(Float, nullable=True)

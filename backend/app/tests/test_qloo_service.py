@@ -170,3 +170,14 @@ def test_partial_title_stays_ambiguous_for_human_choice(fake):
         entity("W1", "Wuthering Heights"),
         entity("W2", "Wuthering Heights (Norton Critical Editions)"))))
     assert qloo_service.resolve("Wuthering").status == MatchStatus.AMBIGUOUS
+
+def test_insights_rejects_unsupported_target_type_before_http_call(fake):
+    with pytest.raises(QlooError, match="Unsupported Insights target type"):
+        qloo_service.get_insights("A1", target_type="urn:entity:unsupported")
+    assert fake.calls == []
+
+
+def test_insights_take_must_be_bounded(fake):
+    with pytest.raises(QlooError, match="take between 1 and 30"):
+        qloo_service.get_insights("A1", take=31)
+    assert fake.calls == []

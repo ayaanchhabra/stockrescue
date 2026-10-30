@@ -65,6 +65,7 @@ class QlooRelatedEntity:
     creators: Tuple[str, ...] = ()   # authors/directors etc., if Qloo supplied them
     tags: Tuple[str, ...] = ()       # genres/themes, if Qloo supplied them
     raw_ref: Optional[str] = None    # pointer to the stored raw response (provenance)
+    affinity: Optional[float] = None # Qloo's query.affinity, never an internal match score
 
 
 @dataclass(frozen=True)

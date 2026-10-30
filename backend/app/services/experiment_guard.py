@@ -41,7 +41,15 @@ def constraints_for_plan(db: Session, plan_id: Optional[int]) -> Constraints:
     if plan_id is None:
         return DEFAULT_CONSTRAINTS
     row = db.get(RescuePlanRow, plan_id)
-    snap = (row.constraints_snapshot if row is not None else None) or {}
+    if row is None:
+        raise NotFound(f"Rescue plan {plan_id} not found")
+    snap = row.constraints_snapshot
+    if snap in (None, {}):
+        # Compatibility for legacy plans that predate stored constraint snapshots.
+        return DEFAULT_CONSTRAINTS
+    if not isinstance(snap, dict):
+        from app.errors import ConstraintViolation
+        raise ConstraintViolation(["Saved plan constraints must be a JSON object."])
     try:
         return Constraints(
             min_margin_pct=snap.get("min_margin_pct", DEFAULT_CONSTRAINTS.min_margin_pct),
@@ -53,8 +61,9 @@ def constraints_for_plan(db: Session, plan_id: Optional[int]) -> Constraints:
                 str(x) for x in snap.get("restricted_product_ids", ())
             ),
         )
-    except (TypeError, ValueError):
-        return DEFAULT_CONSTRAINTS
+    except (TypeError, ValueError) as exc:
+        from app.errors import ConstraintViolation
+        raise ConstraintViolation([f"Saved plan constraints are invalid: {exc}"]) from exc
 
 
 def check_experiment(
@@ -69,12 +78,24 @@ def check_experiment(
 ) -> Optional[ConstraintResult]:
     """Check an experiment against the rules.
 
-    Strategy type ``other`` has no economics contract and returns ``None``.
-    Every actionable strategy must have a price; missing price is a hard
-    validation failure, not a reason to skip the constraint engine.
+    Unknown strategy types fail closed. Every actionable strategy must have a
+    price; unsupported values are never treated as constraint-free.
     """
     if strategy_type not in CHECKED_TYPES:
-        return None
+        return ConstraintResult(
+            passed=False,
+            violations=(Violation("INVALID_PLAN", f"Unsupported strategy type: {strategy_type!r}."),),
+        )
+    if strategy_type == "bundle" and not bundle_product_pks:
+        return ConstraintResult(
+            passed=False,
+            violations=(Violation("INVALID_PLAN", "A bundle experiment must include at least one partner product."),),
+        )
+    if strategy_type != "bundle" and bundle_product_pks:
+        return ConstraintResult(
+            passed=False,
+            violations=(Violation("INVALID_PLAN", "Only bundle experiments may include partner products."),),
+        )
     if proposed_price is None:
         return ConstraintResult(
             passed=False,
