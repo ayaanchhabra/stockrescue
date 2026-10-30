@@ -97,3 +97,20 @@ Date: 2026-10-30
 - Fresh SQLite database: `alembic upgrade head` — passed; `alembic current` — `27c4190e336d (head)`; `alembic check` — `No new upgrade operations detected`.
 - Legacy database migration preservation and schema check — covered by passing migration integration test.
 - Live Qloo harness smoke test — blocked because `qloo` CLI is unavailable; no live response claimed.
+
+
+## 30 October 2026 — urgent MVP implementation update
+
+**Scope completed locally:**
+- Added the missing direct-experiment settings snapshot: newly created experiments capture the validated retailer settings (or the full settings snapshot saved with their plan). Edit, approval and start revalidation now use that saved snapshot rather than silently switching to current retailer defaults.
+- Added regression coverage showing direct experiment creation enforces saved retailer margin/discount constraints and preserves the original constraints through approval after the retailer changes settings.
+- Added rollback handling to retailer settings persistence.
+- Added `PUT` to the CORS allowed methods so the frontend can save settings.
+- Added dashboard cards for total inventory units, potential retail value and inventory cost.
+- Added frontend bearer-token entry using the existing backend authentication contract; the token is stored in tab-scoped session storage and never bundled into public environment variables.
+- Added a retailer Settings screen connected to authenticated `GET /settings` and `PUT /settings`.
+- Updated README/setup/test instructions and added frontend typecheck script.
+
+**Verification:** `python -m compileall -q app` passed; `python -m pytest -q` → 494 passed; `python -m pytest tests/test_migrations.py -q` → 2 passed. The frontend dependency installation (`npm ci`) timed out in this environment and there were no installed Node type packages, so TypeScript, lint and Next.js production build could not be verified here.
+
+**Still requires the project owner's environment:** live event-authorized Qloo harness calls; PostgreSQL migration and transaction validation; frontend `npm ci`/typecheck/lint/build on a network-enabled machine; full manual T01–T10; target-host deployment and external persistence/CORS checks. The current browser token flow is a hackathon demo integration only; replace it with a proper short-lived server session/OAuth arrangement before production.

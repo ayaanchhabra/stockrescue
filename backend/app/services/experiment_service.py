@@ -16,6 +16,7 @@ from app.models import (ExperimentOutcome, ExperimentStockReservation, Idempoten
 from app.schemas.experiments import (ExperimentCreate, ExperimentUpdate, OutcomeIn)
 from app.services.experiment_calc import compute_outcome
 from app.services.experiment_guard import check_experiment, margin_from
+from app.services.retailer_settings_service import decision_settings_from_payload, load_decision_settings
 from app.tenant import retailer_id_for
 
 TRANSITIONS: dict[str, set[str]] = {
@@ -52,12 +53,12 @@ def _move(exp: RescueExperiment, new_status: str) -> None:
 
 
 def _enforce_rules(db: Session, *, plan_id, product_pk, strategy_type, bundle_product_pks,
-                   proposed_price, estimated_cost):
-    """Hard constraints on the CURRENT inventory. Returns the server-side margin."""
+                   proposed_price, estimated_cost, settings_snapshot=None):
+    """Recheck current inventory against the experiment's saved decision rules."""
     result = check_experiment(
         db, plan_id=plan_id, product_pk=product_pk, strategy_type=strategy_type,
         bundle_product_pks=bundle_product_pks, proposed_price=proposed_price,
-        estimated_cost=estimated_cost,
+        estimated_cost=estimated_cost, settings_snapshot=settings_snapshot,
     )
     if result is not None and not result.passed:
         raise ConstraintViolation(result.reasons)
@@ -72,6 +73,37 @@ def list_experiments(db: Session, status: str | None = None) -> list[RescueExper
     if status:
         q = q.where(RescueExperiment.status == status)
     return list(db.scalars(q))
+
+
+def _settings_snapshot_for_experiment(db: Session, plan: RescuePlan | None) -> dict:
+    """Capture the exact decision settings used by a new experiment.
+
+    Newly generated plans carry a complete settings_snapshot. Older saved plans
+    carry only their constraints, so preserve those historical hard constraints
+    while filling the other settings from the retailer's current validated config.
+    Direct experiments use the retailer's current settings.
+    """
+    current = load_decision_settings(db).payload
+    snapshot = json.loads(json.dumps(current))
+    if plan is None:
+        return snapshot
+
+    plan_rules = plan.constraints_snapshot if isinstance(plan.constraints_snapshot, dict) else {}
+    saved = plan_rules.get("settings_snapshot")
+    if isinstance(saved, dict):
+        # Validate through the same schema/adapter used by the settings endpoint.
+        return decision_settings_from_payload(saved).payload
+
+    # Backward compatibility for plans created before complete settings snapshots.
+    known = {
+        key: plan_rules[key]
+        for key in ("min_margin_pct", "max_discount_pct", "max_campaign_budget", "restricted_product_ids")
+        if key in plan_rules
+    }
+    if known:
+        snapshot["constraints"].update(known)
+        return decision_settings_from_payload(snapshot).payload
+    return snapshot
 
 
 def _product_snapshot(db: Session, product_pks: list[int]) -> dict:
@@ -380,12 +412,14 @@ def create_experiment(
                 f"Experiment {twin.id} already exists for this strategy of this plan "
                 f"(status '{twin.status}')."
             )
+    settings_snapshot = _settings_snapshot_for_experiment(db, plan)
     margin = _enforce_rules(
         db, plan_id=data.plan_id, product_pk=data.product_pk, strategy_type=data.strategy_type,
         bundle_product_pks=data.bundle_product_pks, proposed_price=data.proposed_price,
-        estimated_cost=data.estimated_cost,
+        estimated_cost=data.estimated_cost, settings_snapshot=settings_snapshot,
     )
     values = data.model_dump()
+    values["settings_snapshot"] = settings_snapshot
     values["calculated_margin_pct"] = margin  # a client-supplied margin is never stored
     values["product_snapshot"] = _product_snapshot(db, [data.product_pk, *data.bundle_product_pks])
     e = RescueExperiment(**values, status="proposed")
@@ -442,6 +476,7 @@ def update_proposal(db: Session, exp_id: int, data: ExperimentUpdate) -> RescueE
         db, plan_id=e.plan_id, product_pk=e.product_pk, strategy_type=e.strategy_type,
         bundle_product_pks=merged["bundle_product_pks"] or [],
         proposed_price=merged["proposed_price"], estimated_cost=merged["estimated_cost"],
+        settings_snapshot=e.settings_snapshot,
     )
     for k, v in changes.items():
         setattr(e, k, v)
@@ -458,7 +493,7 @@ def approve(db: Session, exp_id: int, approved_by: str) -> RescueExperiment:
     e.calculated_margin_pct = _enforce_rules(
         db, plan_id=e.plan_id, product_pk=e.product_pk, strategy_type=e.strategy_type,
         bundle_product_pks=e.bundle_product_pks or [], proposed_price=e.proposed_price,
-        estimated_cost=e.estimated_cost,
+        estimated_cost=e.estimated_cost, settings_snapshot=e.settings_snapshot,
     )
     # A SAVEPOINT protects the surrounding transaction if the unique
     # reservation index detects a concurrent approval.
@@ -497,7 +532,7 @@ def start(db: Session, exp_id: int, start_date, end_date) -> RescueExperiment:
     e.calculated_margin_pct = _enforce_rules(
         db, plan_id=e.plan_id, product_pk=e.product_pk, strategy_type=e.strategy_type,
         bundle_product_pks=e.bundle_product_pks or [], proposed_price=e.proposed_price,
-        estimated_cost=e.estimated_cost,
+        estimated_cost=e.estimated_cost, settings_snapshot=e.settings_snapshot,
     )
     snapshot = _product_snapshot(db, [e.product_pk, *(e.bundle_product_pks or [])])
     snapshot["capture_point"] = "experiment_start"

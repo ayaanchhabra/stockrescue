@@ -25,7 +25,7 @@ from sqlalchemy.orm import Session
 from app.services import economics_service as eco
 from app.services.constraints_service import CandidateStrategy, check_candidate
 from app.services.matcher_service import match_candidates
-from app.services.rescue_config import DEFAULT_CONSTRAINTS, DEFAULT_STRATEGY_SETTINGS
+from app.services.retailer_settings_service import load_decision_settings
 from app.tenant import retailer_id_for
 
 from . import adapters
@@ -99,7 +99,8 @@ def _request(db: Session, product_id: str) -> RescueRequest:
     p = _product(db, product_id)
     stock = adapters.load_stock(db, p.retailer_id)
     target = next(s for s in stock if s.product.product_id == str(p.id))
-    return RescueRequest(target, stock, DEFAULT_CONSTRAINTS, adapters.has_sales_history(p))
+    decision_settings = load_decision_settings(db, p.retailer_id)
+    return RescueRequest(target, stock, decision_settings.constraints, adapters.has_sales_history(p))
 
 
 # ---------------------------------------------------------------------------
@@ -196,10 +197,12 @@ def calculate_bundle_economics(db: Session, product_ids: List[str], proposed_pri
                {"estimated_experiment_cost": NUM, "planned_units": INT}))
 def evaluate_business_constraints(db: Session, strategy_type: str, product_ids: List[str],
                                   proposed_price: float, estimated_experiment_cost: float = 0.0,
-                                  planned_units: int = DEFAULT_STRATEGY_SETTINGS.test_units):
+                                  planned_units: int | None = None):
+    decision_settings = load_decision_settings(db)
     cand = CandidateStrategy(strategy_type, "Tool check", tuple(_refs(db, product_ids)),
-                             proposed_price, estimated_experiment_cost, planned_units)
-    r = check_candidate(cand, DEFAULT_CONSTRAINTS)
+                             proposed_price, estimated_experiment_cost,
+                             planned_units or decision_settings.strategy.test_units)
+    r = check_candidate(cand, decision_settings.constraints)
     return {"passed": r.passed, "violations": [{"code": v.code, "message": v.message} for v in r.violations],
             "metrics": dict(r.metrics)}
 
@@ -208,7 +211,11 @@ def evaluate_business_constraints(db: Session, strategy_type: str, product_ids: 
        "Ranked feasible experiments for a product, with per-dimension scores (not a forecast).",
        _schema({"product_id": STR}))
 def rank_rescue_experiments(db: Session, product_id: str):
-    plan = run_rescue(_request(db, product_id), adapters.DbQlooGateway(db))
+    decision_settings = load_decision_settings(db)
+    plan = run_rescue(
+        _request(db, product_id), adapters.DbQlooGateway(db),
+        ranking_settings=decision_settings.ranking, strategy_settings=decision_settings.strategy,
+    )
     return {"qloo_status": plan.qloo_status.value,
             "ranked": [{"rank": s.rank, "type": s.type.value, "name": s.name,
                         "weighted_total": s.rank_reason.weighted_total,
@@ -219,7 +226,14 @@ def rank_rescue_experiments(db: Session, product_id: str):
 @_tool("generate_experiment_plan", "The full RescuePlan for a product (same as POST /rescue/{pk}).",
        _schema({"product_id": STR}))
 def generate_experiment_plan(db: Session, product_id: str):
-    return run_rescue(_request(db, product_id), adapters.DbQlooGateway(db)).model_dump(mode="json")
+    decision_settings = load_decision_settings(db)
+    plan = run_rescue(
+        _request(db, product_id), adapters.DbQlooGateway(db),
+        ranking_settings=decision_settings.ranking, strategy_settings=decision_settings.strategy,
+    )
+    snapshot = dict(plan.constraints_snapshot)
+    snapshot["settings_snapshot"] = decision_settings.payload
+    return plan.model_copy(update={"constraints_snapshot": snapshot}).model_dump(mode="json")
 
 
 @_tool("save_rescue_plan", "Generate and store a RescuePlan; returns its plan id.",
@@ -227,7 +241,14 @@ def generate_experiment_plan(db: Session, product_id: str):
 def save_rescue_plan(db: Session, product_id: str):
     req = _request(db, product_id)
     gw = adapters.DbQlooGateway(db)
-    plan = run_rescue(req, gw)
+    decision_settings = load_decision_settings(db)
+    plan = run_rescue(
+        req, gw, ranking_settings=decision_settings.ranking,
+        strategy_settings=decision_settings.strategy,
+    )
+    snapshot = dict(plan.constraints_snapshot)
+    snapshot["settings_snapshot"] = decision_settings.payload
+    plan = plan.model_copy(update={"constraints_snapshot": snapshot})
     retailer = _product(db, product_id).retailer_id
     return {"plan_id": adapters.save_plan(db, plan, retailer, gw.evidence_ids)}
 

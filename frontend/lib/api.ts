@@ -1,7 +1,22 @@
 import type { ImportResult } from "@/types/inventory";
 import type { PreviewResult } from "@/types/preview";
+import type { RetailerSettings } from "@/types/settings";
 
 const BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+
+const TOKEN_KEY = "stockrescue_retailer_token";
+
+export function saveRetailerToken(token: string) {
+  if (typeof window !== "undefined") sessionStorage.setItem(TOKEN_KEY, token.trim());
+}
+
+export function clearRetailerToken() {
+  if (typeof window !== "undefined") sessionStorage.removeItem(TOKEN_KEY);
+}
+
+export function hasRetailerToken() {
+  return typeof window !== "undefined" && Boolean(sessionStorage.getItem(TOKEN_KEY));
+}
 
 export class ApiError extends Error {
   status: number;
@@ -16,7 +31,10 @@ export class ApiError extends Error {
 async function request<T>(path: string, init?: RequestInit) {
   let res: Response;
   try {
-    res = await fetch(`${BASE}${path}`, init);
+    const headers = new Headers(init?.headers ?? {});
+    const token = typeof window !== "undefined" ? sessionStorage.getItem(TOKEN_KEY) : null;
+    if (token) headers.set("Authorization", `Bearer ${token}`);
+    res = await fetch(`${BASE}${path}`, { ...init, headers });
   } catch {
     throw new ApiError(0, "network", "Can't reach the backend. Is it running?");
   }
@@ -48,6 +66,18 @@ export async function previewInventory(file: File) {
 
 export async function importInventory(file: File) {
   return (await request<ImportResult>("/inventory/import", { method: "POST", body: csvForm(file) })).data;
+}
+
+export async function getRetailerSettings() {
+  return (await request<RetailerSettings>("/settings")).data;
+}
+
+export async function saveRetailerSettings(settings: RetailerSettings) {
+  return (await request<RetailerSettings>("/settings", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(settings),
+  })).data;
 }
 
 export async function getDashboard<T = unknown>() {

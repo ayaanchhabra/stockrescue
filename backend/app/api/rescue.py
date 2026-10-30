@@ -25,7 +25,7 @@ import functools
 import logging
 from typing import Callable, Optional
 
-from fastapi import APIRouter, Body, Depends, Response
+from fastapi import APIRouter, Body, Depends, Header, Response
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
@@ -35,7 +35,7 @@ from app.agent.explanation import explain_plan
 from app.agent.llm import completer_from_env
 from app.agent.workflow import ExplainFn, RescueRequest, run_rescue
 from app.db.session import get_db
-from app.errors import ConstraintViolation, DuplicateExperiment, NotFound
+from app.errors import ConstraintViolation, DuplicateExperiment, InvalidTransition, NotFound
 from app.schemas.experiments import ExperimentOut
 from app.schemas.rescue import Economics, RescuePlan
 from app.schemas.rescue_api import (
@@ -47,6 +47,7 @@ from app.schemas.rescue_api import (
 )
 from app.services import experiment_service
 from app.services.constraints_service import CandidateStrategy, check_candidate
+from app.services.retailer_settings_service import load_decision_settings
 
 log = logging.getLogger(__name__)
 
@@ -116,8 +117,9 @@ def get_explainer() -> Optional[ExplainFn]:
 def evaluate(body: EvaluateIn, db: Session = Depends(get_db)):
     """Re-check a strategy after the retailer edits its products or price.
     Every number comes from constraints_service.check_candidate."""
+    decision_settings = load_decision_settings(db)
     try:
-        constraints = constraints_from(body.constraints)
+        constraints = constraints_from(body.constraints, decision_settings.constraints)
     except ValueError as e:
         return _err(422, "invalid_constraints", str(e))
     try:
@@ -135,7 +137,7 @@ def evaluate(body: EvaluateIn, db: Session = Depends(get_db)):
         products=tuple(adapters.product_to_ref(found[pk]) for pk in pks),
         proposed_price=body.proposed_price,
         estimated_experiment_cost=body.estimated_experiment_cost,
-        planned_units=body.planned_units,
+        planned_units=body.planned_units or decision_settings.strategy.test_units,
     )
     result = check_candidate(candidate, constraints)
     m = result.metrics
@@ -171,7 +173,11 @@ def get_plan(plan_id: int, db: Session = Depends(get_db)):
 @router.post("/plans/{plan_id}/strategies/{rank}/experiment", response_model=ExperimentOut,
              status_code=201)
 @_safe
-def create_experiment_from_strategy(plan_id: int, rank: int, db: Session = Depends(get_db)):
+def create_experiment_from_strategy(
+    plan_id: int, rank: int, response: Response,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key", max_length=128),
+    db: Session = Depends(get_db),
+):
     """Create a 'proposed' experiment in Person 1's tracker from one strategy.
     The retailer still approves it with POST /experiments/{id}/approve."""
     found = adapters.load_plan(db, plan_id)
@@ -184,7 +190,9 @@ def create_experiment_from_strategy(plan_id: int, rank: int, db: Session = Depen
     except ValueError as e:
         return _err(422, "invalid_plan", f"Plan cannot be turned into an experiment: {e}")
     try:
-        exp = experiment_service.create_experiment(db, data)
+        exp = experiment_service.create_experiment(db, data, idempotency_key=idempotency_key)
+    except InvalidTransition as e:
+        return _err(409, "idempotency_conflict", str(e))
     except NotFound as e:
         return _err(404, "not_found", str(e))
     except ConstraintViolation as e:
@@ -192,6 +200,8 @@ def create_experiment_from_strategy(plan_id: int, rank: int, db: Session = Depen
                     "with the current stock and prices. " + " ".join(e.reasons))
     except DuplicateExperiment as e:
         return _err(409, "duplicate_experiment", str(e))
+    if getattr(exp, "_idempotent_replay", False):
+        response.status_code = 200
     return ExperimentOut.model_validate(exp)
 
 
@@ -208,8 +218,9 @@ def rescue_product(
     """Run the rescue pipeline for one product and return its RescuePlan.
     Qloo or LLM failures give a partial plan (see stages_failed), not an error."""
     body = body or RescueRunIn()
+    decision_settings = load_decision_settings(db)
     try:
-        constraints = constraints_from(body.constraints)
+        constraints = constraints_from(body.constraints, decision_settings.constraints)
     except ValueError as e:
         return _err(422, "invalid_constraints", str(e))
 
@@ -224,7 +235,15 @@ def rescue_product(
 
     gateway = gateway_factory(db, body.refresh_qloo)
     request = RescueRequest(target_item, stock, constraints, adapters.has_sales_history(target))
-    plan = run_rescue(request, gateway, explain=explainer)
+    plan = run_rescue(
+        request, gateway, explain=explainer,
+        ranking_settings=decision_settings.ranking,
+        strategy_settings=decision_settings.strategy,
+    )
+    # Preserve the complete configuration used to produce the recommendation.
+    snapshot = dict(plan.constraints_snapshot)
+    snapshot["settings_snapshot"] = decision_settings.payload
+    plan = plan.model_copy(update={"constraints_snapshot": snapshot})
 
     try:
         plan_id = adapters.save_plan(db, plan, retailer_id, list(getattr(gateway, "evidence_ids", [])))

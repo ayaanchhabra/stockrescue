@@ -32,38 +32,50 @@ from app.services.rescue_config import (
     DEFAULT_STRATEGY_SETTINGS,
     Constraints,
 )
+from app.services.retailer_settings_service import load_decision_settings
 
 CHECKED_TYPES = ("bundle", "reposition", "promotion")
 
 
-def constraints_for_plan(db: Session, plan_id: Optional[int]) -> Constraints:
-    """The rules the plan was generated with, or the store defaults."""
-    if plan_id is None:
-        return DEFAULT_CONSTRAINTS
-    row = db.get(RescuePlanRow, plan_id)
-    if row is None:
-        raise NotFound(f"Rescue plan {plan_id} not found")
-    snap = row.constraints_snapshot
-    if snap in (None, {}):
-        # Compatibility for legacy plans that predate stored constraint snapshots.
-        return DEFAULT_CONSTRAINTS
-    if not isinstance(snap, dict):
+def constraints_for_plan(
+    db: Session, plan_id: Optional[int], settings_snapshot: dict | None = None
+) -> Constraints:
+    """Resolve the saved experiment/plan rules, falling back to current retailer settings.
+
+    An experiment snapshot takes precedence because it records the configuration
+    under which the proposal was created. Older experiments fall back to the plan
+    snapshot, then to the retailer's current configuration for direct proposals.
+    """
+    raw = None
+    if isinstance(settings_snapshot, dict):
+        raw = settings_snapshot.get("constraints")
+    if raw is None and plan_id is not None:
+        row = db.get(RescuePlanRow, plan_id)
+        if row is None:
+            raise NotFound(f"Rescue plan {plan_id} not found")
+        plan_rules = row.constraints_snapshot
+        if plan_rules in (None, {}):
+            return load_decision_settings(db).constraints
+        if not isinstance(plan_rules, dict):
+            from app.errors import ConstraintViolation
+            raise ConstraintViolation(["Saved plan constraints must be a JSON object."])
+        plan_settings = plan_rules.get("settings_snapshot")
+        raw = plan_settings.get("constraints") if isinstance(plan_settings, dict) else plan_rules
+    if raw is None:
+        return load_decision_settings(db).constraints
+    if not isinstance(raw, dict):
         from app.errors import ConstraintViolation
-        raise ConstraintViolation(["Saved plan constraints must be a JSON object."])
+        raise ConstraintViolation(["Saved experiment constraints must be a JSON object."])
     try:
         return Constraints(
-            min_margin_pct=snap.get("min_margin_pct", DEFAULT_CONSTRAINTS.min_margin_pct),
-            max_discount_pct=snap.get("max_discount_pct", DEFAULT_CONSTRAINTS.max_discount_pct),
-            max_campaign_budget=snap.get(
-                "max_campaign_budget", DEFAULT_CONSTRAINTS.max_campaign_budget
-            ),
-            restricted_product_ids=frozenset(
-                str(x) for x in snap.get("restricted_product_ids", ())
-            ),
+            min_margin_pct=raw.get("min_margin_pct", DEFAULT_CONSTRAINTS.min_margin_pct),
+            max_discount_pct=raw.get("max_discount_pct", DEFAULT_CONSTRAINTS.max_discount_pct),
+            max_campaign_budget=raw.get("max_campaign_budget", DEFAULT_CONSTRAINTS.max_campaign_budget),
+            restricted_product_ids=frozenset(str(x) for x in raw.get("restricted_product_ids", [])),
         )
     except (TypeError, ValueError) as exc:
         from app.errors import ConstraintViolation
-        raise ConstraintViolation([f"Saved plan constraints are invalid: {exc}"]) from exc
+        raise ConstraintViolation([f"Saved experiment constraints are invalid: {exc}"]) from exc
 
 
 def check_experiment(
@@ -75,6 +87,7 @@ def check_experiment(
     bundle_product_pks: Sequence[int],
     proposed_price: Optional[float],
     estimated_cost: float,
+    settings_snapshot: dict | None = None,
 ) -> Optional[ConstraintResult]:
     """Check an experiment against the rules.
 
@@ -111,15 +124,17 @@ def check_experiment(
         if p is None:
             raise NotFound(f"Product {pk} not found")
         refs.append(product_to_ref(p))
+    saved_strategy = (settings_snapshot or {}).get("strategy", {}) if isinstance(settings_snapshot, dict) else {}
+    planned_units = saved_strategy.get("test_units", DEFAULT_STRATEGY_SETTINGS.test_units)
     candidate = CandidateStrategy(
         strategy_type=strategy_type,
         name="Experiment",
         products=tuple(refs),
         proposed_price=proposed_price,
         estimated_experiment_cost=estimated_cost,
-        planned_units=DEFAULT_STRATEGY_SETTINGS.test_units,
+        planned_units=planned_units,
     )
-    return check_candidate(candidate, constraints_for_plan(db, plan_id))
+    return check_candidate(candidate, constraints_for_plan(db, plan_id, settings_snapshot))
 
 
 def margin_from(result: Optional[ConstraintResult]) -> Optional[float]:

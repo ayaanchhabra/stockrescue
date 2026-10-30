@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Literal
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.entities import Product
+from app.models.entities import InventorySalesSnapshot, Product
 from app.services.inventory_csv import (
     InventoryCSVRow,
     InventoryIssue,
@@ -130,6 +131,8 @@ def import_inventory_csv(
         if row.product_id is not None
     }
     results_by_row: dict[int, ImportRowResult] = {}
+    snapshot_candidates: list[Product] = []
+    imported_at = datetime.now(timezone.utc)
 
     with db.begin():
         existing_by_sku: dict[str, Product] = {}
@@ -167,12 +170,30 @@ def import_inventory_csv(
                 )
                 db.add(product)
                 existing_by_sku[sku] = product
+                existing = product
                 action = "created"
 
+            # Preserve every valid imported row as a dated sales snapshot. NULL
+            # values remain NULL: a missing sales field is not a zero.
+            snapshot_candidates.append(existing)
             results_by_row[row.row_number] = _row_result(row, action)
 
         # Execute pending INSERT/UPDATE statements while still in the
         # transaction, so database constraint failures trigger rollback.
+        db.flush()
+        db.add_all([
+            InventorySalesSnapshot(
+                retailer_id=retailer_id,
+                product_pk=product.id,
+                imported_at=imported_at,
+                source="inventory_csv",
+                units_sold_30d=product.units_sold_30d,
+                units_sold_60d=product.units_sold_60d,
+                units_sold_90d=product.units_sold_90d,
+                days_in_stock=product.days_in_stock,
+            )
+            for product in snapshot_candidates
+        ])
         db.flush()
 
     ordered_results = [

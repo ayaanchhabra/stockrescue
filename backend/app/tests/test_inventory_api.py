@@ -4,7 +4,7 @@ import io
 from sqlalchemy import select
 
 from app.db.session import SessionLocal
-from app.models.entities import Product
+from app.models.entities import InventorySalesSnapshot, Product
 from app.services.inventory_csv import ALL_COLUMNS
 
 
@@ -173,6 +173,12 @@ def test_import_creates_updates_and_skips_invalid_rows(client):
         assert new_product.creator_or_brand is None
         assert new_product.units_sold_30d is None
 
+        snapshots = db.scalars(select(InventorySalesSnapshot).order_by(InventorySalesSnapshot.id)).all()
+        assert len(snapshots) == 2
+        assert all(row.source == "inventory_csv" for row in snapshots)
+        # Missing sales values remain NULL in historical snapshots.
+        assert snapshots[-1].units_sold_30d is None
+
 
 def test_import_rejects_file_level_error(client):
     invalid_csv = (
@@ -226,6 +232,8 @@ def test_dashboard_returns_current_inventory_metrics(client):
     data = response.json()
 
     assert data["total_products"] == 2
+    assert data["total_inventory_units"] == 14
+    assert data["potential_retail_value"] == 280.0
     assert data["needs_attention_count"] >= 1
     assert data["not_enough_data_count"] == 1
     assert data["total_inventory_cost_tied_up"] == 190.0
@@ -292,6 +300,8 @@ def test_dashboard_api_exposes_slow_moving_rules_and_supporting_values(client):
     data = response.json()
 
     assert data["total_products"] == 5
+    assert data["total_inventory_units"] == 183
+    assert data["potential_retail_value"] == 3660.0
     assert data["needs_attention_count"] == 3
     assert data["not_enough_data_count"] == 1
     assert data["total_inventory_cost_tied_up"] == 1735.0

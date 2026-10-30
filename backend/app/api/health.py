@@ -42,6 +42,7 @@ def ready():
             required = {
                 "products", "qloo_evidence", "qloo_entity_mappings", "rescue_plans",
                 "rescue_experiments", "experiment_outcomes", "idempotency_records",
+                "retailer_settings", "inventory_sales_snapshots",
             }
             missing = sorted(required - table_names)
             checks["schema"] = not missing
