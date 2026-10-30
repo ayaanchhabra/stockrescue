@@ -2,11 +2,16 @@
 from sqlalchemy import func, select
 
 from app import models  # noqa: F401
-from app.db.session import Base, SessionLocal, engine
+from app.db.session import SessionLocal
 from app.models import Product
 
-Base.metadata.create_all(engine)
 with SessionLocal() as db:
+    # Schema is managed by Alembic; this seed helper must never create or
+    # mutate schema implicitly.
+    from sqlalchemy import inspect
+    from app.db.session import engine
+    if "products" not in inspect(engine).get_table_names():
+        raise SystemExit("Database schema is missing. Run `alembic upgrade head` from backend/ first.")
     if db.scalar(select(func.count()).select_from(Product)) == 0:
         db.add_all([
             Product(sku="DEV001", product_name="The God of Small Things", creator_or_brand="Arundhati Roy",

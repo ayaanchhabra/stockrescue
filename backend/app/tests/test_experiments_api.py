@@ -216,3 +216,85 @@ def test_actual_days_must_match_saved_experiment_dates(client):
     eid = run_to_running(client, make_product())
     r = client.post(f"/experiments/{eid}/outcome", json={**OUTCOME, "actual_days": 13})
     assert r.status_code == 422 and "must match the saved experiment date range" in r.json()["message"]
+
+
+def test_idempotency_key_replays_same_experiment(client):
+    pk = make_product()
+    body = {"product_pk": pk, "strategy_type": "promotion", "title": "Keyed promotion",
+            "proposed_action": "Run a short test", "proposed_price": 449.0, "estimated_cost": 100.0}
+    headers = {"Idempotency-Key": "create-promotion-2026-01"}
+    first = client.post("/experiments", json=body, headers=headers)
+    second = client.post("/experiments", json=body, headers=headers)
+    assert first.status_code == 201, first.text
+    assert second.status_code == 200, second.text
+    assert second.json()["id"] == first.json()["id"]
+
+
+def test_idempotency_key_cannot_be_reused_for_different_payload(client):
+    pk = make_product()
+    body = {"product_pk": pk, "strategy_type": "promotion", "title": "Keyed promotion",
+            "proposed_action": "Run a short test", "proposed_price": 449.0, "estimated_cost": 100.0}
+    headers = {"Idempotency-Key": "same-key-different-payload"}
+    assert client.post("/experiments", json=body, headers=headers).status_code == 201
+    changed = {**body, "proposed_price": 459.0}
+    replay = client.post("/experiments", json=changed, headers=headers)
+    assert replay.status_code == 409
+    assert replay.json()["error"] == "idempotency_conflict"
+
+
+def test_readiness_rejects_unversioned_test_schema(client):
+    # Test fixtures create tables directly; readiness correctly requires an
+    # Alembic version marker before the app is considered deployment-ready.
+    response = client.get("/ready")
+    assert response.status_code == 503
+    assert response.json()["checks"]["database"] is True
+    assert response.json()["checks"]["schema"] is True
+    assert response.json()["checks"]["migrations"] is False
+
+
+
+def test_ready_returns_200_when_database_is_currently_migrated(client):
+    from sqlalchemy import text
+    from app.db.session import engine
+    from app.api.health import _alembic_config
+    from alembic.script import ScriptDirectory
+
+    head = ScriptDirectory.from_config(_alembic_config()).get_current_head()
+    with engine.begin() as connection:
+        connection.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)"))
+        connection.execute(text("INSERT INTO alembic_version (version_num) VALUES (:revision)"),
+                           {"revision": head})
+    try:
+        response = client.get("/ready")
+        assert response.status_code == 200
+        assert response.json()["status"] == "ready"
+        assert all(response.json()["checks"].values())
+    finally:
+        with engine.begin() as connection:
+            connection.execute(text("DROP TABLE alembic_version"))
+
+
+def test_experiment_and_idempotency_record_roll_back_together(monkeypatch):
+    from sqlalchemy import func, select
+    from fastapi.testclient import TestClient
+    from app.db.session import SessionLocal
+    from app.main import app
+    from app.models import IdempotencyRecord, RescueExperiment
+    from app.services import experiment_service
+
+    pk = make_product()
+    body = {"product_pk": pk, "strategy_type": "promotion", "title": "Atomic operation",
+            "proposed_action": "Run a short test", "proposed_price": 449.0, "estimated_cost": 100.0}
+
+    def simulated_commit_failure(db):
+        db.rollback()
+        raise RuntimeError("simulated database commit failure")
+
+    monkeypatch.setattr(experiment_service, "commit_or_rollback", simulated_commit_failure)
+    with TestClient(app, raise_server_exceptions=False) as safe_client:
+        response = safe_client.post("/experiments", json=body,
+                                    headers={"Idempotency-Key": "atomicity-regression-1"})
+    assert response.status_code == 500
+    with SessionLocal() as db:
+        assert db.scalar(select(func.count()).select_from(RescueExperiment)) == 0
+        assert db.scalar(select(func.count()).select_from(IdempotencyRecord)) == 0

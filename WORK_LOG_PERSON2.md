@@ -45,3 +45,55 @@ Date: 2026-10-30
 - Live `python qloo_smoke_test.py` — attempted; **not verified** because this environment returned `ConnectError` before an HTTP response.
 - `python -m compileall -q backend/app` — passed.
 - `python -m py_compile backend/qloo_smoke_test.py` — passed.
+
+# Person 2 — Phase 1 / Phase 2 follow-on work log
+
+Date: 2026-10-30
+
+## Phase 1 — P0-26: RescuePlan persistence failure
+
+- Changed `POST /rescue/{product_pk}` so a plan persistence exception triggers rollback and returns HTTP 503 `plan_persistence_failed`.
+- The failure response intentionally contains neither an unsaved RescuePlan nor `X-Rescue-Plan-Id`; downstream experiment creation therefore cannot treat the response as a saved plan.
+- Added a regression test that forces persistence failure and checks the safe 503 response.
+
+## Phase 1 — P0-25: Event-approved Qloo access verification
+
+- Replaced the previous direct-HTTP smoke check with a CLI-based smoke-test script for the event-supported `qloo api` surface. It reports only sanitized status/metadata and does not print credentials, headers or raw provider responses.
+- **Not fully complete / live verification outstanding.** The runtime `qloo_service` still uses its Python HTTP transport; this archive does not claim that transport is event-approved. The official harness CLI is not installed in this environment, there is no configured event key, and the installed Node runtime is v22.16.0 (below the event kit's stated v22.19.0 minimum). Running the smoke test returned `BLOCKED: qloo CLI not found`. Before representing live Qloo as verified, install the supported harness, configure an individually attributable event credential, obtain organizer approval for the backend's current transport or migrate it to the harness, and capture a successful live response.
+
+## Phase 2 — P1-13: Alembic migrations
+
+- Added `alembic.ini`, the migration environment/template and an initial migration for the current database schema.
+- Initial migration includes the idempotency table and the partial unique index for active plan/strategy experiments.
+- Added a safe bootstrap path for complete legacy `create_all()` databases, preserving existing rows while adding the migration-era schema elements. Partial legacy schemas fail clearly rather than being guessed at.
+- Removed implicit production schema creation from application startup and from `seed_dev.py`.
+- Added fresh-database and legacy-database migration integration tests.
+
+## Phase 2 — P1-30: Transactional persistence
+
+- Added a shared `commit_or_rollback()` helper and applied it to plan writes, Qloo mapping/evidence writes, experiment lifecycle changes and outcomes.
+- Evidence creation + mapping update, experiment creation + idempotency record, and outcome creation + experiment completion now share transaction boundaries.
+- Removed unnecessary post-commit refresh queries from these paths to avoid a secondary read error after a successful commit.
+
+## Phase 2 — P1-33: Idempotency and database uniqueness
+
+- Added `idempotency_records` with unique `(retailer_id, idempotency_key)`.
+- `POST /experiments` and create-from-saved-strategy accept an optional `Idempotency-Key` header.
+- Same key + same request returns the original experiment (HTTP 200); same key + different request returns HTTP 409 `idempotency_conflict`.
+- Experiment and idempotency record are saved atomically. A partial unique index also blocks concurrent duplicate active experiments for the same plan/target/title/strategy, while allowing rejected/cancelled records to be retried.
+- Added tests for replay, mismatched key reuse and rollback after simulated commit failure.
+
+## Phase 2 — P1-31: Readiness checks
+
+- `/health` is liveness only.
+- `/ready` checks database connectivity, required tables and whether the current Alembic revision matches the configured migration head. It returns HTTP 503 when any check fails and does not call Qloo.
+- Updated README and API contract documentation.
+
+## Verification
+
+- `cd backend && PYTHONPATH=. python -m pytest -q` — **478 passed**.
+- `python -m compileall -q backend/app` — passed.
+- `python -m py_compile backend/qloo_smoke_test.py` — passed.
+- Fresh SQLite database: `alembic upgrade head` — passed; `alembic current` — `27c4190e336d (head)`; `alembic check` — `No new upgrade operations detected`.
+- Legacy database migration preservation and schema check — covered by passing migration integration test.
+- Live Qloo harness smoke test — blocked because `qloo` CLI is unavailable; no live response claimed.

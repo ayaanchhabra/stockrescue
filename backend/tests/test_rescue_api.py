@@ -168,12 +168,13 @@ def test_unexpected_error_is_500_without_traceback(make_client, shop, monkeypatc
     assert "Traceback" not in r.text and "secret" not in r.text
 
 
-def test_save_failure_still_returns_the_plan(make_client, shop, monkeypatch):
+def test_save_failure_never_returns_an_unsaved_plan(make_client, shop, monkeypatch):
     monkeypatch.setattr(rescue.adapters, "save_plan",
                         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("db full")))
     r = make_client().post(f"/rescue/{shop['target']}")
-    assert r.status_code == 200 and rescue.PLAN_ID_HEADER not in r.headers
-    RescuePlan.model_validate(r.json())
+    assert r.status_code == 503 and rescue.PLAN_ID_HEADER not in r.headers
+    assert r.json()["error"] == "plan_persistence_failed"
+    assert "could not be saved" in r.json()["message"]
 
 
 # --- POST /rescue/evaluate -------------------------------------------------

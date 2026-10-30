@@ -19,6 +19,15 @@ class Base(DeclarativeBase):
     pass
 
 
+def commit_or_rollback(db):
+    """Commit one business operation atomically or reset the failed unit of work."""
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+
 def get_db():
     db = SessionLocal()
     try:

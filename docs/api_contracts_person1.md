@@ -21,6 +21,8 @@ Our errors: `{"error": "<code>", "message": "<human text>"}`
 | 409 | needs_resolution | Insights requested without a strong or confirmed Qloo match |
 | 422 | invalid_calculation_input | e.g. units sold exceed stock at start |
 | 500 | internal_error | Unexpected; details only in server logs |
+| 503 | plan_persistence_failed | Rescue plan could not be saved; the route returns no plan body and no plan-id header. |
+| 409 | idempotency_conflict | An `Idempotency-Key` was reused with a different request body or unavailable resource. |
 
 Request validation errors (wrong types, negatives) use FastAPI's default 422 body: `{"detail": [{"loc": [...], "msg": "...", "type": "..."}]}`.
 
@@ -42,7 +44,8 @@ Catch `QlooError` (`e.kind`) and `NeedsResolution`; continue with retailer data 
 
 | Method | Path | Notes |
 |---|---|---|
-| GET | /health | `{"status":"ok","qloo_key_configured":bool}` |
+| GET | /health | Liveness only: `{"status":"ok","qloo_key_configured":bool}`; does not probe the DB or Qloo. |
+| GET | /ready | HTTP 200 only when DB is reachable, required tables exist, and Alembic is at head; otherwise HTTP 503 with `checks` and safe `details`. |
 | GET | /qloo/status | Real connectivity test. Always HTTP 200: `{"ok":true,"sample_results":n,"from_cache":bool,"base_url":...}` or `{"ok":false,"error":kind,"message":...,"status_code":...}` |
 | GET | /qloo/search?query=&type=urn:entity:book&take=5 | `{"query","candidates":[Candidate],"request_params","from_cache"}` |
 | POST | /products/{pk}/qloo/resolve?force=false | Returns Mapping. A human-confirmed mapping is kept unless `force=true`. |
@@ -72,7 +75,7 @@ Status flow: `proposed -> approved -> running -> completed`. Also `proposed -> r
 | Method | Path | Body | Result |
 |---|---|---|---|
 | GET | /experiments?status= | | list |
-| POST | /experiments | create | 201, status `proposed` |
+| POST | /experiments | create; accepts optional `Idempotency-Key` header (1–128 chars) | 201 for a new experiment; 200 when replaying the same key/body; 409 if the key is reused with a different body |
 | GET | /experiments/{id} | | |
 | PATCH | /experiments/{id} | any of `proposed_action, bundle_product_pks, proposed_price, estimated_cost, calculated_margin_pct` | only while `proposed`, else 409 |
 | POST | /experiments/{id}/approve | optional `{"approved_by"}` | `approved` |
@@ -106,5 +109,6 @@ When `is_simulated` is true, the first limitation starts with "SIMULATED".
 | QLOO_TIMEOUT_SECONDS | no | 15 | |
 | QLOO_CACHE_TTL_SECONDS | no | 3600 | in-memory cache, per process |
 
-Start command (from `backend/`): `uvicorn app.main:app --host 0.0.0.0 --port $PORT`. Health check path: `/health`.
-Tables are created at startup with `Base.metadata.create_all()`. There are no migrations.
+Start command (from `backend/`): `uvicorn app.main:app --host 0.0.0.0 --port $PORT`.
+
+Apply schema changes before starting the application: `alembic upgrade head` (from `backend/`). Use `/health` for process liveness and `/ready` for database/schema/migration readiness. Production startup does not mutate the schema; schema evolution is managed by Alembic. Use `alembic current` to inspect the installed revision and `alembic check` to detect model/schema drift.

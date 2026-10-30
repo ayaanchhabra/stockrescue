@@ -30,6 +30,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.db.session import commit_or_rollback
 from app.models import Product, QlooEntityMapping
 from app.models import RescuePlan as RescuePlanRow
 from app.schemas.experiments import ExperimentCreate
@@ -296,9 +297,14 @@ def save_plan(db: Session, plan: RescuePlan, retailer_id: str, evidence_ids: Seq
         plan_json=plan.model_dump(mode="json"),
     )
     db.add(row)
-    db.commit()
-    db.refresh(row)
-    return row.id
+    try:
+        db.flush()
+        plan_id = row.id
+        commit_or_rollback(db)
+        return plan_id
+    except Exception:
+        db.rollback()
+        raise
 
 
 def load_plan(db: Session, plan_id: int) -> Optional[Tuple[RescuePlanRow, RescuePlan]]:
