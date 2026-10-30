@@ -115,6 +115,12 @@ def _qloo_evidence(target: ProductRef, links: Sequence[CandidateMatch]) -> List[
                 entity_id=m.entity.entity_id,
                 entity_name=m.entity.name,
                 entity_type=m.entity.entity_type,
+                qloo_affinity=m.entity.qloo_affinity,
+                source_entity_id=m.entity.source_entity_id,
+                source_entity_type=m.entity.source_entity_type,
+                evidence_id=m.entity.evidence_id,
+                request_params=m.entity.request_params,
+                fetched_at=m.entity.fetched_at,
                 raw_ref=m.entity.raw_ref,
             )
         )

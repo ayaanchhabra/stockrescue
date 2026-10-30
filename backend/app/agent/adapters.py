@@ -24,19 +24,21 @@ GET /qloo/evidence/{id}.
 from __future__ import annotations
 
 import logging
+from datetime import timezone
 import re
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import Product, QlooEntityMapping
+from app.models import Product, QlooEntityMapping, QlooEvidence
 from app.models import RescuePlan as RescuePlanRow
 from app.schemas.experiments import ExperimentCreate
 from app.schemas.rescue import EvidenceSource, QlooStatus, RescuePlan, Strategy
 from app.services import entity_resolution_service as ers
 from app.services.constraints_service import ProductRef
 from app.services.matcher_service import QlooRelatedEntity, StockItem
+from app.tenant import retailer_id_for
 
 from .workflow import QlooResolution
 
@@ -101,11 +103,13 @@ def has_sales_history(p: Product) -> bool:
 
 
 def load_target(db: Session, product_pk: int) -> Optional[Product]:
-    return db.get(Product, product_pk)
+    return db.scalar(select(Product).where(
+        Product.id == product_pk, Product.retailer_id == retailer_id_for(db)
+    ))
 
 
 def load_products(db: Session, product_pks: Sequence[int]) -> Dict[int, Product]:
-    rows = db.scalars(select(Product).where(Product.id.in_(list(product_pks))))
+    rows = db.scalars(select(Product).where(Product.id.in_(list(product_pks)), Product.retailer_id == retailer_id_for(db)))
     return {p.id: p for p in rows}
 
 
@@ -184,6 +188,8 @@ class DbQlooGateway:
         self.insights_take = insights_take
         self.evidence_ids: List[int] = []
         self._pk: Optional[int] = None
+        self._source_entity_id: Optional[str] = None
+        self._source_entity_type: Optional[str] = None
 
     def _note_evidence(self, evidence_id: Optional[int]) -> None:
         if evidence_id is not None and evidence_id not in self.evidence_ids:
@@ -200,6 +206,8 @@ class DbQlooGateway:
             self.db.rollback()
             raise
         self._note_evidence(mapping.evidence_id)
+        self._source_entity_id = mapping.qloo_entity_id
+        self._source_entity_type = mapping.qloo_entity_type
         return mapping_to_resolution(mapping)
 
     def get_insights(self, resolution: QlooResolution) -> Tuple[QlooRelatedEntity, ...]:
@@ -225,6 +233,12 @@ class DbQlooGateway:
                 creators=(),  # Qloo book entities carry no author field
                 tags=tags,
                 raw_ref=ref,
+                qloo_affinity=e.affinity,
+                source_entity_id=result.source_entity_id or self._source_entity_id,
+                source_entity_type=self._source_entity_type,
+                evidence_id=evidence_id,
+                request_params=dict(result.request_params),
+                fetched_at=result.fetched_at,
             ))
         return tuple(out)
 
@@ -246,26 +260,80 @@ def _int_ids(values: Iterable[str]) -> List[int]:
 
 
 def save_plan(db: Session, plan: RescuePlan, retailer_id: str, evidence_ids: Sequence[int]) -> int:
-    """Store the plan in Person 1's rescue_plans table and return its id."""
+    """Atomically persist a plan only with products/evidence owned by its retailer."""
+    if retailer_id != retailer_id_for(db):
+        raise ValueError("Authenticated retailer does not match the plan owner")
     product_ids = _int_ids([plan.product_id] + [p.product_id for s in plan.strategies for p in s.products])
+    owned_products = db.scalars(select(Product).where(
+        Product.id.in_(product_ids), Product.retailer_id == retailer_id
+    )).all()
+    if len(owned_products) != len(product_ids):
+        raise ValueError("A plan product is missing or belongs to another retailer")
+
+    required_evidence = {
+        evidence_id for strategy in plan.strategies
+        for evidence_id in strategy_evidence_ids(strategy)
+    }
+    supplied_evidence = set(int(i) for i in evidence_ids)
+    if not required_evidence.issubset(supplied_evidence):
+        raise ValueError("Plan references Qloo evidence not included in the save operation")
+    if supplied_evidence:
+        evidence_rows = db.scalars(select(QlooEvidence).where(
+            QlooEvidence.id.in_(supplied_evidence),
+            QlooEvidence.product_pk == int(plan.product_id),
+        )).all()
+        if len(evidence_rows) != len(supplied_evidence):
+            raise ValueError("Plan evidence is missing or does not belong to its target product")
+        evidence_by_id = {e.id: e for e in evidence_rows}
+        for strategy in plan.strategies:
+            for claim in strategy.evidence:
+                if claim.source != EvidenceSource.QLOO:
+                    continue
+                source_row = evidence_by_id.get(claim.evidence_id)
+                if source_row is None:
+                    raise ValueError("Qloo claim references evidence not owned by this target")
+                if source_row.kind != "insights":
+                    raise ValueError("Qloo strategy evidence must reference a stored Insights response")
+                if source_row.request_params != claim.request_params:
+                    raise ValueError("Qloo claim request parameters do not match the stored evidence")
+                if source_row.request_params.get("signal.interests.entities") != claim.source_entity_id:
+                    raise ValueError("Qloo claim source entity does not match the stored request")
+                if claim.fetched_at is not None and source_row.fetched_at is not None:
+                    claim_time = claim.fetched_at
+                    stored_time = source_row.fetched_at
+                    if claim_time.tzinfo is None:
+                        claim_time = claim_time.replace(tzinfo=timezone.utc)
+                    if stored_time.tzinfo is None:
+                        stored_time = stored_time.replace(tzinfo=timezone.utc)
+                    if abs((claim_time - stored_time).total_seconds()) > 1:
+                        raise ValueError("Qloo claim fetch timestamp does not match its stored evidence")
+                raw = source_row.response_json if isinstance(source_row.response_json, dict) else {}
+                results = raw.get("results", {})
+                returned_entities = results.get("entities", []) if isinstance(results, dict) else results
+                returned_ids = {
+                    str(item.get("entity_id") or item.get("id"))
+                    for item in (returned_entities if isinstance(returned_entities, list) else [])
+                    if isinstance(item, dict) and (item.get("entity_id") or item.get("id"))
+                }
+                if claim.entity_id not in returned_ids:
+                    raise ValueError("Qloo destination entity is absent from the stored provider response")
+
     row = RescuePlanRow(
-        retailer_id=retailer_id,
-        product_ids=product_ids,
-        status="draft",
-        generated_at=plan.generated_at,
-        evidence_ids=list(evidence_ids),
+        retailer_id=retailer_id, product_ids=product_ids, status="draft",
+        generated_at=plan.generated_at, evidence_ids=sorted(supplied_evidence),
         constraints_snapshot=plan.constraints_snapshot,
         ranking_rationale={str(s.rank): s.rank_reason.model_dump(mode="json") for s in plan.strategies},
         plan_json=plan.model_dump(mode="json"),
     )
     db.add(row)
+    db.flush()
     db.commit()
     db.refresh(row)
     return row.id
 
 
 def load_plan(db: Session, plan_id: int) -> Optional[Tuple[RescuePlanRow, RescuePlan]]:
-    row = db.get(RescuePlanRow, plan_id)
+    row = db.scalar(select(RescuePlanRow).where(RescuePlanRow.id == plan_id, RescuePlanRow.retailer_id == retailer_id_for(db)))
     if row is None or not row.plan_json:
         return None
     return row, RescuePlan.model_validate(row.plan_json)
@@ -275,8 +343,10 @@ def strategy_evidence_ids(strategy: Strategy) -> List[int]:
     ids: List[int] = []
     for e in strategy.evidence:
         if e.source == EvidenceSource.QLOO:
-            i = parse_evidence_ref(e.raw_ref)
-            if i is not None and i not in ids:
+            i = e.evidence_id
+            if i is None or parse_evidence_ref(e.raw_ref) != i:
+                raise ValueError("Qloo evidence ID and raw reference are inconsistent")
+            if i not in ids:
                 ids.append(i)
     return ids
 

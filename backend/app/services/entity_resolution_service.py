@@ -6,21 +6,29 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.errors import NeedsResolution, NotFound
+from app.errors import InvalidTransition, NeedsResolution, NotFound
 from app.models import Product, QlooEntityMapping, QlooEvidence
 from app.schemas.qloo import InsightsResult, MatchStatus
 from app.services import qloo_service
+from app.tenant import retailer_id_for
 
 
 def _product(db: Session, product_pk: int) -> Product:
-    p = db.get(Product, product_pk)
+    p = db.scalar(select(Product).where(
+        Product.id == product_pk, Product.retailer_id == retailer_id_for(db)
+    ))
     if not p:
         raise NotFound(f"Product {product_pk} not found")
     return p
 
 
 def get_mapping(db: Session, product_pk: int) -> QlooEntityMapping | None:
-    return db.scalar(select(QlooEntityMapping).where(QlooEntityMapping.product_pk == product_pk))
+    return db.scalar(
+        select(QlooEntityMapping)
+        .join(Product, Product.id == QlooEntityMapping.product_pk)
+        .where(QlooEntityMapping.product_pk == product_pk,
+               Product.retailer_id == retailer_id_for(db))
+    )
 
 
 def resolve_product(db: Session, product_pk: int, force: bool = False) -> QlooEntityMapping:
@@ -28,10 +36,16 @@ def resolve_product(db: Session, product_pk: int, force: bool = False) -> QlooEn
     A mapping a human already confirmed is kept unless force=True."""
     product = _product(db, product_pk)
     existing = get_mapping(db, product_pk)
-    if existing and existing.verification_status == "confirmed" and not force:
+    # A human confirmation/rejection is final; force refresh only applies to unjudged mappings.
+    if existing and existing.verification_status in ("confirmed", "rejected"):
         return existing
 
-    result = qloo_service.resolve(product.product_name, creator=product.creator_or_brand)
+    expected_year = (product.publication_or_release_date.year
+                     if product.publication_or_release_date else None)
+    result = qloo_service.resolve(
+        product.product_name, creator=product.creator_or_brand, publication_year=expected_year,
+        isbn13=product.isbn13,
+    )
     ev = QlooEvidence(product_pk=product_pk, kind="resolve", request_path=result.endpoint,
                       request_params=result.request_params, response_json=result.raw,
                       from_cache=result.from_cache)
@@ -61,6 +75,12 @@ def confirm_mapping(db: Session, product_pk: int, entity_id: str) -> QlooEntityM
     m = get_mapping(db, product_pk)
     if not m:
         raise NotFound("Resolve this product first")
+    if m.verification_status == "confirmed":
+        if m.qloo_entity_id == entity_id:
+            return m
+        raise InvalidTransition("A confirmed Qloo mapping is final and cannot be changed.")
+    if m.verification_status == "rejected":
+        raise InvalidTransition("A rejected Qloo mapping is final and cannot be confirmed.")
     cand = next((c for c in m.candidates if c.get("entity_id") == entity_id), None)
     if not cand:
         raise NotFound(f"Entity {entity_id} is not among the stored candidates")
@@ -75,9 +95,14 @@ def confirm_mapping(db: Session, product_pk: int, entity_id: str) -> QlooEntityM
 
 
 def reject_mapping(db: Session, product_pk: int) -> QlooEntityMapping:
+    _product(db, product_pk)
     m = get_mapping(db, product_pk)
     if not m:
         raise NotFound("Resolve this product first")
+    if m.verification_status == "confirmed":
+        raise InvalidTransition("A confirmed Qloo mapping is final and cannot be rejected.")
+    if m.verification_status == "rejected":
+        return m
     m.verification_status = "rejected"
     db.commit()
     db.refresh(m)
@@ -105,7 +130,7 @@ def insights_for_product(db: Session, product_pk: int, take: int = 10,
     })
     ev = QlooEvidence(product_pk=product_pk, kind="insights", request_path=result.endpoint,
                       request_params=result.request_params, response_json=result.raw,
-                      from_cache=result.from_cache)
+                      from_cache=result.from_cache, fetched_at=datetime.fromisoformat(result.fetched_at))
     db.add(ev)
     db.commit()
     db.refresh(ev)
@@ -113,7 +138,12 @@ def insights_for_product(db: Session, product_pk: int, take: int = 10,
 
 
 def get_evidence(db: Session, evidence_id: int) -> QlooEvidence:
-    ev = db.get(QlooEvidence, evidence_id)
+    ev = db.scalar(
+        select(QlooEvidence)
+        .join(Product, Product.id == QlooEvidence.product_pk)
+        .where(QlooEvidence.id == evidence_id,
+               Product.retailer_id == retailer_id_for(db))
+    )
     if not ev:
         raise NotFound(f"Evidence {evidence_id} not found")
     return ev

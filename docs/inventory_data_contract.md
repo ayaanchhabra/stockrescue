@@ -30,6 +30,7 @@ The contract follows the Product model in
 | CSV column | Database field | Type | Validation |
 |---|---|---|---|
 | `creator_or_brand` | `creator_or_brand` | String | Maximum 200 characters |
+| `isbn13` | `isbn13` | Optional ISBN-13 | 13 digits; separators accepted in CSV and normalized before storage |
 | `product_description` | `product_description` | Text | Optional |
 | `genre_or_subcategory` | `genre_or_subcategory` | String | Maximum 100 characters |
 | `units_sold_30d` | `units_sold_30d` | Integer | Whole number >= 0 |

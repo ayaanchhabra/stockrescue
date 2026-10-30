@@ -7,6 +7,7 @@ monkeypatch, so nothing reaches Qloo. Entity ids and names are illustrative
 """
 
 import pytest
+from datetime import datetime
 
 from app.agent import adapters
 from app.agent.adapters import (
@@ -25,7 +26,7 @@ from app.agent.adapters import (
     strategy_to_experiment_create,
 )
 from app.agent.workflow import RescueRequest, run_rescue
-from app.models import Product, QlooEntityMapping
+from app.models import Product, QlooEntityMapping, QlooEvidence
 from app.schemas.qloo import InsightEntity, InsightsResult
 from app.schemas.rescue import EvidenceSource, QlooStatus, RescuePlan
 from app.services.qloo_service import QlooError
@@ -37,7 +38,8 @@ from p2_helpers import add_mapping, add_product
 def insights(*entities, evidence_id=41):
     """TEST DOUBLE result shaped like Person 1's InsightsResult."""
     return evidence_id, InsightsResult(
-        source_entity_id="ent-target", target_type="urn:entity:book", request_params={},
+        source_entity_id="ent-target", target_type="urn:entity:book",
+        request_params={"signal.interests.entities": "ent-target"},
         entities=list(entities), fetched_at="2026-10-27T00:00:00+00:00",
     )
 
@@ -245,6 +247,11 @@ def shop(db, monkeypatch):
     partner = add_product(db, "P1", "Companion Essays", qty=5, cost=200, price=400)
     other = add_product(db, "P2", "Unrelated Atlas", qty=9, cost=300, price=600)
     add_mapping(db, target, status="strong", entity_id="ent-target", evidence_id=None)
+    db.add(QlooEvidence(id=41, product_pk=target, kind="insights", request_path="/v2/insights",
+                        request_params={"signal.interests.entities": "ent-target"},
+                        response_json={"results": {"entities": [{"entity_id": "ent-ce"}]}},
+                        from_cache=False, fetched_at=datetime.fromisoformat("2026-10-27T00:00:00+00:00")))
+    db.commit()
     monkeypatch.setattr(adapters.ers, "insights_for_product", lambda *a, **k: insights(
         InsightEntity(entity_id="ent-ce", name="Companion Essays", types=["urn:entity:book"])))
     return {"target": target, "partner": partner, "other": other}
@@ -292,3 +299,12 @@ def test_strategy_to_experiment_create(db, shop):
     assert bundle.test_plan in data.proposed_action
     with pytest.raises(KeyError):
         strategy_to_experiment_create(plan, 99, None)
+
+
+def test_save_plan_rejects_qloo_destination_not_in_stored_provider_response(db, shop):
+    plan, gw = run(db, shop["target"])
+    qloo_claims = [e for s in plan.strategies for e in s.evidence if e.source == EvidenceSource.QLOO]
+    assert qloo_claims
+    qloo_claims[0].entity_id = "forged-not-returned-by-qloo"
+    with pytest.raises(ValueError, match="destination entity is absent"):
+        save_plan(db, plan, "demo", gw.evidence_ids)

@@ -223,9 +223,10 @@ def rescue_product(
 
     try:
         plan_id = adapters.save_plan(db, plan, retailer_id, list(getattr(gateway, "evidence_ids", [])))
-    except Exception:  # noqa: BLE001 - saving is best-effort; the plan is still useful
+    except Exception:  # noqa: BLE001 - persisted plans are required for downstream experiments
         db.rollback()
-        log.warning("Could not save rescue plan for product %s", product_pk, exc_info=True)
-    else:
-        response.headers[PLAN_ID_HEADER] = str(plan_id)
+        log.exception("Could not persist rescue plan for product %s", product_pk)
+        return _err(500, "plan_persistence_failed",
+                    "The rescue plan could not be saved. No experiment can be created from this result.")
+    response.headers[PLAN_ID_HEADER] = str(plan_id)
     return plan

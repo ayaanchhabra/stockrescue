@@ -10,6 +10,10 @@ class Settings(BaseSettings):
     qloo_cache_ttl_seconds: int = 3600
     database_url: str = "sqlite:///./stockrescue.db"
     cors_origins: str = "http://localhost:3000"
+    # JSON object mapping SHA-256 bearer-token hashes to retailer IDs. Raw tokens never live in env.
+    retailer_api_token_hashes: str = "{}"
+    qloo_requests_per_minute: int = 15
+    rescue_runs_per_minute: int = 5
 
     @property
     def sqlalchemy_url(self) -> str:

@@ -29,6 +29,7 @@ class Product(Base):
     product_name: Mapped[str] = mapped_column(String(300))
     category: Mapped[str] = mapped_column(String(100), default="Books")
     creator_or_brand: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    isbn13: Mapped[str | None] = mapped_column(String(13), nullable=True)
     quantity_in_stock: Mapped[int] = mapped_column(Integer)
     unit_cost: Mapped[float] = mapped_column(Float)
     selling_price: Mapped[float] = mapped_column(Float)
@@ -123,3 +124,22 @@ class ExperimentOutcome(Base):
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     experiment: Mapped["RescueExperiment"] = relationship(back_populates="outcome")
+
+
+class ExperimentStockReservation(Base):
+    """Exclusive active-experiment commitment for one retailer SKU.
+
+    The current experiment schema has no per-SKU planned-unit field. The safe
+    MVP policy is therefore one approved/running experiment per SKU, rather
+    than inventing a quantity reservation. No on-hand stock is decremented.
+    """
+    __tablename__ = "experiment_stock_reservations"
+    __table_args__ = (
+        UniqueConstraint("product_pk", name="uq_active_experiment_product_reservation"),
+        UniqueConstraint("experiment_id", "product_pk", name="uq_experiment_product_reservation"),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    experiment_id: Mapped[int] = mapped_column(ForeignKey("rescue_experiments.id", ondelete="CASCADE"), index=True)
+    product_pk: Mapped[int] = mapped_column(ForeignKey("products.id", ondelete="CASCADE"), index=True)
+    retailer_id: Mapped[str] = mapped_column(String(64), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

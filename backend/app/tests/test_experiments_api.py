@@ -84,9 +84,11 @@ def test_units_exceeding_stock_rejected(client):
 
 def test_summary_keeps_simulated_separate(client):
     pk = make_product()
-    real, sim = run_to_running(client, pk), run_to_running(client, pk)
+    sim_pk = make_product(sku="B002", name="Simulated Test Book")
+    real, sim = run_to_running(client, pk), run_to_running(client, sim_pk)
     client.post(f"/experiments/{real}/outcome", json=OUTCOME)
-    client.post(f"/experiments/{sim}/outcome", json={**OUTCOME, "is_simulated": True})
+    simulated_outcome = {**OUTCOME, "items": [{**OUTCOME["items"][0], "product_id": "B002"}], "is_simulated": True}
+    client.post(f"/experiments/{sim}/outcome", json=simulated_outcome)
     s = client.get("/experiments/summary").json()
     assert s["observed"]["completed_experiments"] == 1 and s["simulated"]["completed_experiments"] == 1
     assert s["observed"]["gross_profit"] == 2800.0
@@ -96,7 +98,8 @@ def test_summary_keeps_simulated_separate(client):
 # ---------------- Qloo endpoints (mocked Qloo) ----------------
 def test_resolve_then_insights_stores_evidence(client, fake):
     pk = make_product()
-    fake.push("/search", FakeResponse(200, search_payload(entity("A1", "The God of Small Things"))))
+    fake.push("/search", FakeResponse(200, search_payload(
+        entity("A1", "The God of Small Things", description="A novel by Arundhati Roy"))))
     m = client.post(f"/products/{pk}/qloo/resolve").json()
     assert m["match_status"] == "strong" and m["qloo_entity_id"] == "A1" and m["coverage_gap"] is False
     fake.push("/v2/insights", FakeResponse(200, insights_payload(
@@ -137,3 +140,49 @@ def test_status_endpoint_reports_failure_honestly(client, fake):
     fake.push("/search", FakeResponse(401, {}))
     r = client.get("/qloo/status").json()
     assert r["ok"] is False and r["error"] == "auth"
+
+
+def test_active_experiments_cannot_double_commit_same_sku(client):
+    from sqlalchemy import select
+    from app.db.session import SessionLocal
+    from app.models import ExperimentStockReservation, Product
+
+    pk = make_product(qty=24, sku="STOCK-LOCK-1")
+    first = new_experiment(client, pk)
+    second = new_experiment(client, pk)
+
+    approved = client.post(f"/experiments/{first['id']}/approve", json={"approved_by": "owner"})
+    assert approved.status_code == 200 and approved.json()["status"] == "approved"
+    conflict = client.post(f"/experiments/{second['id']}/approve", json={"approved_by": "owner"})
+    assert conflict.status_code == 409
+    assert conflict.json()["error"] == "stock_commitment_conflict"
+    assert "STOCK-LOCK-1" in conflict.json()["conflicting_skus"]
+
+    with SessionLocal() as db:
+        quantity = db.scalar(select(Product.quantity_in_stock).where(Product.id == pk))
+        reservations = db.scalars(select(ExperimentStockReservation).where(
+            ExperimentStockReservation.product_pk == pk
+        )).all()
+    assert quantity == 24  # reservation never decrements actual on-hand inventory
+    assert len(reservations) == 1 and reservations[0].experiment_id == first["id"]
+
+    assert client.post(f"/experiments/{first['id']}/cancel").json()["status"] == "cancelled"
+    retry = client.post(f"/experiments/{second['id']}/approve", json={"approved_by": "owner"})
+    assert retry.status_code == 200 and retry.json()["status"] == "approved"
+
+
+def test_bundle_reserves_target_and_each_component(client):
+    from sqlalchemy import select
+    from app.db.session import SessionLocal
+    from app.models import ExperimentStockReservation
+
+    target = make_product(sku="BUNDLE-TARGET")
+    partner = make_product(sku="BUNDLE-PARTNER", name="Bundle Partner")
+    experiment = new_experiment(client, target, bundle_product_pks=[partner])
+    response = client.post(f"/experiments/{experiment['id']}/approve")
+    assert response.status_code == 200
+    with SessionLocal() as db:
+        reserved = set(db.scalars(select(ExperimentStockReservation.product_pk).where(
+            ExperimentStockReservation.experiment_id == experiment["id"]
+        )).all())
+    assert reserved == {target, partner}

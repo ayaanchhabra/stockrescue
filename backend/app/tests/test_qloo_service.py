@@ -7,10 +7,11 @@ from app.services.qloo_service import QlooError
 from app.tests.conftest import FakeResponse, entity, insights_payload, search_payload
 
 
-def test_strong_match_exact_name(fake):
+def test_exact_title_alone_requires_human_confirmation(fake):
     fake.push("/search", FakeResponse(200, search_payload(entity("A1", "1984"), entity("A2", "Animal Farm"))))
     r = qloo_service.resolve("1984")
-    assert r.status == MatchStatus.STRONG and r.chosen.entity_id == "A1"
+    assert r.status == MatchStatus.AMBIGUOUS and r.chosen is None
+    assert "human confirmation" in r.reason
     assert r.raw is not None and r.request_params["types"] == "urn:entity:book"
 
 
@@ -21,14 +22,15 @@ def test_ambiguous_same_name(fake):
     assert r.status == MatchStatus.AMBIGUOUS and r.chosen is None and len(r.candidates) == 2
 
 
-def test_main_edition_chosen_when_it_dominates(fake):
+def test_main_edition_requires_creator_metadata_not_popularity(fake):
     fake.push("/search", FakeResponse(200, search_payload(
-        entity("F74B", "The God of Small Things", ratings=312686, popularity=0.997),
+        entity("F74B", "The God of Small Things", ratings=312686, popularity=0.997,
+               description="A novel by Arundhati Roy"),
         entity("D24F", "The God of Small Things", ratings=46),
         entity("4F22", "Arundhati Roy's The God of Small Things: A Reader's Guide", ratings=363))))
-    r = qloo_service.resolve("The God of Small Things")
+    r = qloo_service.resolve("The God of Small Things", creator="Arundhati Roy")
     assert r.status == MatchStatus.STRONG and r.chosen.entity_id == "F74B"
-    assert "far more Goodreads ratings" in r.reason
+    assert "creator name appears" in r.reason
 
 
 def test_two_popular_editions_stay_ambiguous(fake):
@@ -37,21 +39,54 @@ def test_two_popular_editions_stay_ambiguous(fake):
     assert qloo_service.resolve("Dune").status == MatchStatus.AMBIGUOUS
 
 
-def test_subtitle_match_resolves_sapiens(fake):
+def test_subtitle_match_needs_corroborating_metadata(fake):
     fake.push("/search", FakeResponse(200, search_payload(
         entity("S1", "Sapiens: A Brief History of Humankind", ratings=1163646),
         entity("S2", "Sapiens: A Graphic History, Volume 2 - The Pillars of Civilization", ratings=4715),
         entity("S3", "Sapiens and Homo Deus: The E-book Collection", ratings=1282),
         entity("S4", "Simon vs. the Homo Sapiens Agenda (Simonverse, #1)", ratings=457978))))
     r = qloo_service.resolve("Sapiens")
-    assert r.status == MatchStatus.STRONG and r.chosen.entity_id == "S1"
+    assert r.status == MatchStatus.AMBIGUOUS and r.chosen is None
 
 
-def test_creator_is_only_a_note_never_a_decision(fake):
+def test_creator_metadata_corroborates_identity(fake):
     fake.push("/search", FakeResponse(200, search_payload(
         entity("A1", "1984", description="A novel by George Orwell"))))
     r = qloo_service.resolve("1984", creator="George Orwell")
     assert r.status == MatchStatus.STRONG and "creator name appears" in r.reason
+
+
+def test_publication_year_corroborates_exact_title_and_conflict_stays_ambiguous(fake):
+    fake.push("/search", FakeResponse(200, search_payload(entity("A1", "1984", year=1949))))
+    matching = qloo_service.resolve("1984", publication_year=1949)
+    assert matching.status == MatchStatus.STRONG and matching.chosen.entity_id == "A1"
+
+    qloo_service.clear_cache()
+    fake.push("/search", FakeResponse(200, search_payload(entity("A1", "1984", year=1950))))
+    conflict = qloo_service.resolve("1984", publication_year=1949)
+    assert conflict.status == MatchStatus.AMBIGUOUS and conflict.chosen is None
+    assert "conflicts" in conflict.reason
+
+
+def test_isbn13_corroborates_only_matching_provider_isbn(fake):
+    fake.push("/search", FakeResponse(200, search_payload(
+        entity("A1", "1984", isbn13="9780306406157"))))
+    matching = qloo_service.resolve("1984", isbn13="978-0-306-40615-7")
+    assert matching.status == MatchStatus.STRONG and matching.chosen.entity_id == "A1"
+
+    qloo_service.clear_cache()
+    fake.push("/search", FakeResponse(200, search_payload(
+        entity("A1", "1984", isbn13="9783161484100"))))
+    conflict = qloo_service.resolve("1984", isbn13="9780306406157")
+    assert conflict.status == MatchStatus.AMBIGUOUS and conflict.chosen is None
+
+
+def test_disambiguation_metadata_can_corroborate_creator(fake):
+    fake.push("/search", FakeResponse(200, search_payload(
+        {"entity_id": "A1", "name": "1984", "types": ["urn:entity:book"],
+         "disambiguation": "Novel by George Orwell"})))
+    matching = qloo_service.resolve("1984", creator="George Orwell")
+    assert matching.status == MatchStatus.STRONG and matching.chosen.entity_id == "A1"
 
 
 def test_no_match_empty_results(fake):
@@ -82,8 +117,9 @@ def test_auth_error_fails_fast(fake):
 
 def test_rate_limit_then_success(fake):
     fake.push("/search", FakeResponse(429, {}, {"Retry-After": "1"}),
-              FakeResponse(200, search_payload(entity("A1", "1984"))))
-    assert qloo_service.resolve("1984").status == MatchStatus.STRONG
+              FakeResponse(200, search_payload(
+                  entity("A1", "1984", description="A novel by George Orwell"))))
+    assert qloo_service.resolve("1984", creator="George Orwell").status == MatchStatus.STRONG
     assert len(fake.calls) == 2
 
 
@@ -143,7 +179,8 @@ def test_insights_for_product_drops_other_editions_of_same_book(fake):
     from app.tests.conftest import make_product
     pk = make_product()
     fake.push("/search", FakeResponse(200, search_payload(
-        entity("F74B", "The God of Small Things", ratings=312686))))
+        entity("F74B", "The God of Small Things", ratings=312686,
+               description="A novel by Arundhati Roy"))))
     with SessionLocal() as db:
         ers.resolve_product(db, pk)
         fake.push("/v2/insights", FakeResponse(200, insights_payload(
@@ -156,4 +193,6 @@ def test_insights_for_product_drops_other_editions_of_same_book(fake):
 def test_html_entities_in_names_are_decoded(fake):
     fake.push("/search", FakeResponse(200, search_payload(
         entity("H1", "Atomic Habits: Build &amp; Break"))))
-    assert qloo_service.resolve("Atomic Habits").chosen.name == "Atomic Habits: Build & Break"
+    result = qloo_service.resolve("Atomic Habits")
+    assert result.status == MatchStatus.AMBIGUOUS
+    assert result.candidates[0].name == "Atomic Habits: Build & Break"

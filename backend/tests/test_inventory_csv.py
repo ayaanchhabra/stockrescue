@@ -252,3 +252,13 @@ def test_extremely_large_numeric_value_is_rejected():
         issue.field == "unit_cost"
         for issue in preview.invalid_rows[0].errors
     )
+
+
+def test_optional_isbn13_is_validated_and_normalized():
+    headers = REQUIRED_HEADERS + ["isbn13"]
+    valid = preview_inventory_csv(make_csv([{**BASE_ROW, "isbn13": "978-0-306-40615-7"}], headers))
+    assert valid.valid_rows[0].values["isbn13"] == "9780306406157"
+
+    invalid = preview_inventory_csv(make_csv([{**BASE_ROW, "isbn13": "9780306406158"}], headers))
+    assert not invalid.valid_rows
+    assert any(issue.field == "isbn13" for issue in invalid.invalid_rows[0].errors)

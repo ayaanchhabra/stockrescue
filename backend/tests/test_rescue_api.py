@@ -6,6 +6,7 @@ injected with dependency overrides. All data is illustrative (NOT real Qloo data
 """
 
 import json
+from datetime import datetime
 
 import pytest
 
@@ -18,7 +19,7 @@ from app.agent.explanation import explain_plan  # noqa: E402
 from app.agent.workflow import QlooResolution  # noqa: E402
 from app.api import rescue  # noqa: E402
 from app.db.session import get_db  # noqa: E402
-from app.models import RescueExperiment  # noqa: E402
+from app.models import RescueExperiment, QlooEvidence  # noqa: E402
 from app.schemas.rescue import QlooStatus, RescuePlan  # noqa: E402
 from app.services.matcher_service import QlooRelatedEntity  # noqa: E402
 from p2_helpers import add_product  # noqa: E402
@@ -48,9 +49,18 @@ def shop(db):
     t = add_product(db, "T1", "Slow Novel", qty=24, cost=350, price=500)
     p = add_product(db, "P1", "Companion Essays", qty=5, cost=200, price=400, units_sold_30d=2)
     o = add_product(db, "P2", "Unrelated Atlas", qty=9, cost=300, price=600)
+    db.add(QlooEvidence(id=41, product_pk=t, kind="insights", request_path="/v2/insights",
+                        request_params={"signal.interests.entities": "ent-t"},
+                        response_json={"results": {"entities": [{"entity_id": "ent-ce"}]}},
+                        from_cache=False, fetched_at=datetime.fromisoformat("2026-10-30T06:00:00+00:00")))
+    db.commit()
     return {"target": t, "partner": p, "other": o,
-            "entity": QlooRelatedEntity("ent-ce", "Companion Essays", "urn:entity:book", (), (),
-                                        "qloo_evidence:41")}
+            "entity": QlooRelatedEntity(
+                "ent-ce", "Companion Essays", "urn:entity:book", (), (), "qloo_evidence:41",
+                qloo_affinity=0.71, source_entity_id="ent-t", source_entity_type="urn:entity:book",
+                evidence_id=41, request_params={"signal.interests.entities": "ent-t"},
+                fetched_at="2026-10-30T06:00:00+00:00",
+            )}
 
 
 @pytest.fixture
@@ -168,12 +178,13 @@ def test_unexpected_error_is_500_without_traceback(make_client, shop, monkeypatc
     assert "Traceback" not in r.text and "secret" not in r.text
 
 
-def test_save_failure_still_returns_the_plan(make_client, shop, monkeypatch):
+def test_save_failure_is_reported_and_plan_is_not_returned(make_client, shop, monkeypatch):
     monkeypatch.setattr(rescue.adapters, "save_plan",
                         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("db full")))
     r = make_client().post(f"/rescue/{shop['target']}")
-    assert r.status_code == 200 and rescue.PLAN_ID_HEADER not in r.headers
-    RescuePlan.model_validate(r.json())
+    assert r.status_code == 500 and rescue.PLAN_ID_HEADER not in r.headers
+    assert r.json()["error"] == "plan_persistence_failed"
+    assert "product_id" not in r.json()
 
 
 # --- POST /rescue/evaluate -------------------------------------------------

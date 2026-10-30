@@ -35,8 +35,13 @@ RULES = Constraints(min_margin_pct=15, max_discount_pct=25, max_campaign_budget=
 
 
 def link(product, kind=EXACT, entity_name="Related Work", similarity=1.0):
+    evidence_id = 7
     entity = QlooRelatedEntity(
-        f"ent-{product.product_id}-{entity_name}", entity_name, "book", (), (), f"raw/{product.product_id}"
+        f"ent-{product.product_id}-{entity_name}", entity_name, "urn:entity:book", (), (),
+        f"qloo_evidence:{evidence_id}", qloo_affinity=0.72,
+        source_entity_id="ent-source", source_entity_type="urn:entity:book",
+        evidence_id=evidence_id, request_params={"signal.interests.entities": "ent-source"},
+        fetched_at="2026-10-30T06:00:00+00:00",
     )
     return CandidateMatch(product, kind, entity, f"test link to {product.name}", similarity)
 
@@ -103,7 +108,13 @@ def test_qloo_evidence_carries_the_entity_id_and_provenance():
     qloo = [e for e in bundle.evidence if e.source == EvidenceSource.QLOO]
     assert len(qloo) == 1
     assert qloo[0].entity_id == "ent-B002-Related Work"
-    assert qloo[0].entity_name == "Related Work" and qloo[0].raw_ref == "raw/B002"
+    assert qloo[0].entity_name == "Related Work" and qloo[0].raw_ref == "qloo_evidence:7"
+    assert qloo[0].qloo_affinity == 0.72
+    assert qloo[0].source_entity_id == "ent-source"
+    assert qloo[0].source_entity_type == "urn:entity:book"
+    assert qloo[0].evidence_id == 7
+    assert qloo[0].request_params == {"signal.interests.entities": "ent-source"}
+    assert qloo[0].fetched_at.isoformat() == "2026-10-30T06:00:00+00:00"
     assert "Related Work" in qloo[0].note and "Companion Essays" in qloo[0].note
     assert "(exact match)" in qloo[0].note
 
@@ -301,3 +312,18 @@ def test_strategy_types_serialise_as_plain_strings_for_the_frontend():
     dumped = {s["type"] for s in plan.model_dump(mode="json")["strategies"]}
     assert dumped == {"bundle", "reposition", "promotion"}
     assert isinstance(plan.strategies[0].type, StrategyType)
+
+
+def test_qloo_evidence_requires_complete_stored_provenance():
+    from pydantic import ValidationError
+    from app.schemas.rescue import Evidence
+
+    with pytest.raises(ValidationError, match="positive stored evidence_id"):
+        Evidence(source=EvidenceSource.QLOO, note="Related work returned by Qloo",
+                 entity_id="destination-id", source_entity_id="source-id",
+                 raw_ref=None, request_params={}, fetched_at=datetime.now(timezone.utc))
+
+    with pytest.raises(ValidationError, match="must preserve its provider fetch timestamp"):
+        Evidence(source=EvidenceSource.QLOO, note="Related work returned by Qloo",
+                 entity_id="destination-id", source_entity_id="source-id",
+                 evidence_id=8, raw_ref="qloo_evidence:8", request_params={})

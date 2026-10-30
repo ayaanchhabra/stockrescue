@@ -98,10 +98,6 @@ def _request(path: str, params: dict) -> tuple[Any, bool]:
 
 
 # ---------------- parsing helpers ----------------
-MIN_RATINGS = 1000      # a "dominant" edition must have at least this many Goodreads ratings...
-DOMINANCE_RATIO = 10    # ...and at least this many times more than the runner-up
-
-
 def _norm(s: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]", "", (s or "").lower())).strip()
 
@@ -164,17 +160,6 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _dominant(cands: list[QlooCandidate]) -> QlooCandidate | None:
-    """Among same-name editions, return one only if it is overwhelmingly the most-rated."""
-    ranked = sorted(cands, key=lambda c: c.goodreads_ratings_count or 0, reverse=True)
-    top = ranked[0]
-    top_n = top.goodreads_ratings_count or 0
-    second_n = (ranked[1].goodreads_ratings_count or 0) if len(ranked) > 1 else 0
-    if top_n >= MIN_RATINGS and top_n >= DOMINANCE_RATIO * second_n:
-        return top
-    return None
-
-
 # ---------------- public API ----------------
 def search_entities(query: str, entity_type: str = BOOK, take: int = 5,
                     creator: str | None = None) -> tuple[list[QlooCandidate], Any, dict, bool]:
@@ -190,7 +175,19 @@ def search_entities(query: str, entity_type: str = BOOK, take: int = 5,
         props = _props(it)
         in_desc = None
         if creator_norm:
-            in_desc = creator_norm in _norm(str(props.get("description") or ""))
+            # The Books entity shape does not reliably expose a dedicated author
+            # field. Search only descriptive/disambiguation metadata, never title
+            # popularity or internal title similarity, for creator corroboration.
+            descriptive_values = [
+                props.get("description"),
+                props.get("short_description"),
+                it.get("disambiguation"),
+            ]
+            description_text = " ".join(
+                value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+                for value in descriptive_values if value is not None
+            )
+            in_desc = creator_norm in _norm(description_text)
         cands.append(QlooCandidate(
             entity_id=str(eid), name=name, types=_types(it),
             publication_year=_int(props.get("publication_year")),
@@ -207,8 +204,13 @@ def search_entities(query: str, entity_type: str = BOOK, take: int = 5,
 
 
 def resolve(product_name: str, creator: str | None = None,
-            entity_type: str = BOOK, take: int = 5) -> ResolveResult:
-    """Resolve a product name to a Qloo entity: strong / ambiguous / none."""
+            entity_type: str = BOOK, take: int = 5,
+            publication_year: int | None = None, isbn13: str | None = None) -> ResolveResult:
+    """Resolve cautiously: title uniqueness or popularity alone is not identity proof.
+
+    A strong automatic match requires corroborating creator, ISBN or publication-year
+    metadata. Otherwise an exact/near title remains provisional for human review.
+    """
     cands, data, params, cached = search_entities(product_name, entity_type, take, creator)
     q_norm = _norm(product_name)
     q_raw = product_name.strip().lower()
@@ -226,41 +228,66 @@ def resolve(product_name: str, creator: str | None = None,
     if not cands:
         return done(MatchStatus.NONE, None, "Qloo returned no entities for this title")
 
-    # 1) same title (ignoring case/punctuation)
-    exact = [c for c in cands if _norm(c.name) == q_norm]
-    if len(exact) == 1:
-        return done(MatchStatus.STRONG, exact[0], "Exactly one entity has the same name")
-    if len(exact) > 1:
-        top = _dominant(exact)
-        if top:
-            return done(MatchStatus.STRONG, top,
-                        f"{len(exact)} entities share this name; chose the edition with far more "
-                        f"Goodreads ratings ({top.goodreads_ratings_count}); please verify")
-        return done(MatchStatus.AMBIGUOUS, None,
-                    f"{len(exact)} entities share this name and none is clearly the main edition; needs human choice")
+    def corroborates(candidate: QlooCandidate) -> tuple[bool, str]:
+        """Only independent identity metadata can turn a title candidate strong."""
+        if isbn13 and candidate.isbn13:
+            if re.sub(r"[^0-9Xx]", "", isbn13).upper() == re.sub(
+                r"[^0-9Xx]", "", candidate.isbn13
+            ).upper():
+                return True, "ISBN-13 matches the retailer record"
+            return False, "ISBN-13 conflicts with the retailer record"
+        if publication_year is not None and candidate.publication_year is not None:
+            if candidate.publication_year != publication_year:
+                return False, "publication year conflicts with the retailer record"
+            if creator and candidate.creator_in_description is not True:
+                return False, "year matches but creator is not corroborated in Qloo metadata"
+            return True, "publication year matches the retailer record"
+        if creator:
+            if candidate.creator_in_description is True:
+                return True, "creator name appears in Qloo metadata"
+            return False, "creator is not corroborated in Qloo metadata"
+        return False, "only title evidence is available; human confirmation is required"
 
-    # 2) title + subtitle, e.g. "Sapiens" -> "Sapiens: A Brief History of Humankind"
+    # 1) same title (ignoring case/punctuation). Popularity is not identity proof.
+    exact = [c for c in cands if _norm(c.name) == q_norm]
+    if exact:
+        supported = [(c, corroborates(c)) for c in exact]
+        verified = [(c, why) for c, (ok, why) in supported if ok]
+        if len(verified) == 1:
+            chosen, why = verified[0]
+            return done(MatchStatus.STRONG, chosen,
+                        f"Exact title with corroborating identity metadata: {why}")
+        if len(exact) == 1:
+            _, why = supported[0]
+            return done(MatchStatus.AMBIGUOUS, None,
+                        f"Exact title found, but identity is not sufficiently established: {why}")
+        return done(MatchStatus.AMBIGUOUS, None,
+                    f"{len(exact)} entities share this title; metadata does not identify one uniquely")
+
+    # 2) title + subtitle. The subtitle is a candidate signal, not sufficient identity proof.
     subtitle = [c for c in cands
                 if re.match(r"^" + re.escape(q_raw) + r"\s*[:\-\u2013\u2014(]", c.name.strip().lower())]
-    if len(subtitle) == 1:
-        return done(MatchStatus.STRONG, subtitle[0],
-                    "Title starts with the search text (subtitle/edition); please verify")
-    if len(subtitle) > 1:
-        top = _dominant(subtitle)
-        if top:
-            return done(MatchStatus.STRONG, top,
-                        f"{len(subtitle)} titles start with the search text; chose the one with far more "
-                        f"Goodreads ratings ({top.goodreads_ratings_count}); please verify")
-        return done(MatchStatus.AMBIGUOUS, None, "Several titles start with the search text; needs human choice")
+    if subtitle:
+        supported = [(c, corroborates(c)) for c in subtitle]
+        verified = [(c, why) for c, (ok, why) in supported if ok]
+        if len(verified) == 1:
+            chosen, why = verified[0]
+            return done(MatchStatus.STRONG, chosen,
+                        f"Title/subtitle candidate with corroborating identity metadata: {why}")
+        return done(MatchStatus.AMBIGUOUS, None,
+                    "Title/subtitle candidate found, but work/edition identity needs human confirmation")
 
-    # 3) very close spelling
+    # 3) close spelling. Never auto-select a fuzzy title without independent identity evidence.
     best = cands[0]
     second = cands[1] if len(cands) > 1 else None
     if best.internal_name_similarity >= 0.9 and (
             second is None or best.internal_name_similarity - second.internal_name_similarity >= 0.1):
-        return done(MatchStatus.STRONG, best, "Very close name match (not exact); please verify")
-    return done(MatchStatus.AMBIGUOUS, None, "No exact name match; candidates need review")
-
+        ok, why = corroborates(best)
+        if ok:
+            return done(MatchStatus.STRONG, best, f"Very close title plus corroborating metadata: {why}")
+        return done(MatchStatus.AMBIGUOUS, None,
+                    f"Very close title candidate is provisional: {why}")
+    return done(MatchStatus.AMBIGUOUS, None, "No exact title match; candidates need human review")
 
 def get_insights(entity_id: str, target_type: str = BOOK, take: int = 10,
                  exclude_entity_ids: list[str] | None = None) -> InsightsResult:

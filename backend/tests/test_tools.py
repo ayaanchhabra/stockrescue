@@ -5,10 +5,11 @@ illustrative (NOT real Qloo data).
 """
 
 import pytest
+from datetime import datetime
 
 from app.agent import adapters
 from app.agent.tools import ToolError, call_tool, list_tools
-from app.models import QlooEntityMapping
+from app.models import QlooEntityMapping, QlooEvidence
 from app.schemas.qloo import InsightEntity, InsightsResult
 from app.schemas.rescue import RescuePlan
 from p2_helpers import add_mapping, add_product
@@ -26,10 +27,17 @@ def shop(db, monkeypatch):
     t = add_product(db, "T1", "Slow Novel", qty=24, cost=350, price=500, units_sold_30d=0)
     p = add_product(db, "P1", "Companion Essays", qty=6, cost=200, price=400)
     add_mapping(db, t, status="strong", entity_id="ent-t")
+    # The mocked Insights service returns evidence ID 41, so mirror its stored row.
+    db.add(QlooEvidence(id=41, product_pk=t, kind="insights", request_path="/v2/insights",
+                        request_params={"signal.interests.entities": "ent-t"},
+                        response_json={"results": {"entities": [{"entity_id": "ent-ce"}]}},
+                        from_cache=False, fetched_at=datetime.fromisoformat("2026-10-27T00:00:00+00:00")))
+    db.commit()
 
     def fake_insights(session, pk, take=10):  # TEST DOUBLE
         return 41, InsightsResult(source_entity_id="ent-t", target_type="urn:entity:book",
-                                  request_params={}, fetched_at="x",
+                                  request_params={"signal.interests.entities": "ent-t"},
+                                  fetched_at="2026-10-27T00:00:00+00:00",
                                   entities=[InsightEntity(entity_id="ent-ce", name="Companion Essays")])
 
     monkeypatch.setattr(adapters.ers, "insights_for_product", fake_insights)
@@ -103,6 +111,18 @@ def test_plan_tools(db, shop):
     ranked = call_tool("rank_rescue_experiments", {"product_id": shop["t"]}, db=db)
     assert [r["rank"] for r in ranked["ranked"]] == list(range(1, len(ranked["ranked"]) + 1))
     plan = RescuePlan.model_validate(call_tool("generate_experiment_plan", {"product_id": shop["t"]}, db=db))
-    assert plan.strategies
+    assert plan.strategies, (plan.qloo_status, plan.stages_failed, plan.rejected, plan.stages_completed)
     saved = call_tool("save_rescue_plan", {"product_id": shop["t"]}, db=db)
     assert adapters.load_plan(db, saved["plan_id"]) is not None
+
+
+def test_inventory_tool_cannot_select_another_retailer(db):
+    own = add_product(db, "OWN-TOOL", "Own retailer item")
+    add_product(db, "OTHER-TOOL", "Other retailer item", retailer_id="other")
+    # This mirrors the authenticated DB session context populated by get_db().
+    db.info["retailer_id"] = "demo"
+    inventory = call_tool("get_inventory", {}, db=db)
+    assert [row["product_id"] for row in inventory] == [str(own)]
+    # The tool has no caller-selectable retailer_id argument anymore.
+    with pytest.raises(ToolError, match="unknown argument"):
+        call_tool("get_inventory", {"retailer_id": "other"}, db=db)
