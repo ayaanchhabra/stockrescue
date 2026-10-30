@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.errors import InvalidTransition, NeedsResolution, NotFound
+from app.db.session import commit_or_rollback
 from app.models import Product, QlooEntityMapping, QlooEvidence
 from app.schemas.qloo import InsightsResult, MatchStatus
 from app.services import qloo_service
@@ -37,23 +38,25 @@ def resolve_product(db: Session, product_pk: int, force: bool = False) -> QlooEn
                       request_params=result.request_params, response_json=result.raw,
                       from_cache=result.from_cache)
     db.add(ev)
-    db.flush()
-
-    m = existing or QlooEntityMapping(product_pk=product_pk, match_status="none")
-    chosen = result.chosen
-    m.qloo_entity_id = chosen.entity_id if chosen else None
-    m.qloo_entity_type = (chosen.types[0] if chosen and chosen.types else None)
-    m.matched_name = chosen.name if chosen else None
-    m.match_status = result.status.value
-    m.match_reason = result.reason
-    m.verification_status = "unverified"
-    m.candidates = [c.model_dump() for c in result.candidates]
-    m.evidence_id = ev.id
-    m.last_checked_at = datetime.now(timezone.utc)
-    db.add(m)
-    db.commit()
-    db.refresh(m)
-    return m
+    try:
+        db.flush()
+        m = existing or QlooEntityMapping(product_pk=product_pk, match_status="none")
+        chosen = result.chosen
+        m.qloo_entity_id = chosen.entity_id if chosen else None
+        m.qloo_entity_type = (chosen.types[0] if chosen and chosen.types else None)
+        m.matched_name = chosen.name if chosen else None
+        m.match_status = result.status.value
+        m.match_reason = result.reason
+        m.verification_status = "unverified"
+        m.candidates = [c.model_dump() for c in result.candidates]
+        m.evidence_id = ev.id
+        m.last_checked_at = datetime.now(timezone.utc)
+        db.add(m)
+        commit_or_rollback(db)
+        return m
+    except Exception:
+        db.rollback()
+        raise
 
 
 def confirm_mapping(db: Session, product_pk: int, entity_id: str) -> QlooEntityMapping:
@@ -76,8 +79,7 @@ def confirm_mapping(db: Session, product_pk: int, entity_id: str) -> QlooEntityM
     types = cand.get("types") or []
     m.qloo_entity_type = types[0] if types else None
     m.verification_status = "confirmed"
-    db.commit()
-    db.refresh(m)
+    commit_or_rollback(db)
     return m
 
 
@@ -92,8 +94,7 @@ def reject_mapping(db: Session, product_pk: int) -> QlooEntityMapping:
             "A person's Qloo match decision is final; this mapping cannot be changed."
         )
     m.verification_status = "rejected"
-    db.commit()
-    db.refresh(m)
+    commit_or_rollback(db)
     return m
 
 
@@ -122,8 +123,7 @@ def insights_for_product(db: Session, product_pk: int, take: int = 10,
                       request_params=result.request_params, response_json=result.raw,
                       from_cache=result.from_cache)
     db.add(ev)
-    db.commit()
-    db.refresh(ev)
+    commit_or_rollback(db)
     return ev.id, result
 
 

@@ -4,8 +4,8 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 from typing import Any
 
-from sqlalchemy import (JSON, Boolean, CheckConstraint, Date, DateTime, Float,
-                        ForeignKey, Integer, String, Text, UniqueConstraint)
+from sqlalchemy import (JSON, Boolean, CheckConstraint, Date, DateTime, Float, ForeignKey,
+                        Index, Integer, String, Text, UniqueConstraint, text)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.session import Base
@@ -91,6 +91,15 @@ class RescuePlan(Base):
 
 class RescueExperiment(Base):
     __tablename__ = "rescue_experiments"
+    __table_args__ = (
+        Index(
+            "uq_plan_strategy_live",
+            "plan_id", "product_pk", "title", "strategy_type",
+            unique=True,
+            sqlite_where=text("status NOT IN ('rejected', 'cancelled')"),
+            postgresql_where=text("status NOT IN ('rejected', 'cancelled')"),
+        ),
+    )
     id: Mapped[int] = mapped_column(primary_key=True)
     plan_id: Mapped[int | None] = mapped_column(ForeignKey("rescue_plans.id"), nullable=True, index=True)
     product_pk: Mapped[int] = mapped_column(ForeignKey("products.id"), index=True)  # target slow mover
@@ -125,3 +134,18 @@ class ExperimentOutcome(Base):
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     experiment: Mapped["RescueExperiment"] = relationship(back_populates="outcome")
+
+
+class IdempotencyRecord(Base):
+    """A request key tied atomically to the experiment created by that request."""
+    __tablename__ = "idempotency_records"
+    __table_args__ = (
+        UniqueConstraint("retailer_id", "idempotency_key", name="uq_idempotency_retailer_key"),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    retailer_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    resource_type: Mapped[str] = mapped_column(String(40), default="experiment", nullable=False)
+    resource_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

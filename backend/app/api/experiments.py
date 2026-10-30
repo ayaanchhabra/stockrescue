@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Header, Response
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
@@ -22,8 +22,16 @@ def list_all(status: str | None = None, db: Session = Depends(get_db)):
 
 
 @router.post("", response_model=ExperimentOut, status_code=201)
-def create(body: ExperimentCreate, db: Session = Depends(get_db)):
-    return svc.create_experiment(db, body)
+def create(
+    body: ExperimentCreate,
+    response: Response,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key", max_length=128),
+    db: Session = Depends(get_db),
+):
+    experiment = svc.create_experiment(db, body, idempotency_key=idempotency_key)
+    if getattr(experiment, "_idempotent_replay", False):
+        response.status_code = 200
+    return experiment
 
 
 @router.get("/{exp_id}", response_model=ExperimentOut)

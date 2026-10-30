@@ -20,3 +20,7 @@ class ConstraintViolation(Exception):
 
 class DuplicateExperiment(Exception):
     """The same strategy from the same plan already has an open experiment."""
+
+
+class IdempotencyConflict(Exception):
+    """An idempotency key was reused with a different request payload."""

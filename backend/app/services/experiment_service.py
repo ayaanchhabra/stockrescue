@@ -2,12 +2,17 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from decimal import Decimal
+import hashlib
+import json
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.errors import ConstraintViolation, DuplicateExperiment, InvalidTransition, NotFound
-from app.models import ExperimentOutcome, Product, QlooEvidence, RescueExperiment, RescuePlan
+from app.errors import ConstraintViolation, DuplicateExperiment, IdempotencyConflict, InvalidTransition, NotFound
+from app.db.session import commit_or_rollback
+from app.models import (ExperimentOutcome, IdempotencyRecord, Product, QlooEvidence,
+                        RescueExperiment, RescuePlan)
 from app.schemas.experiments import (ExperimentCreate, ExperimentUpdate, OutcomeIn)
 from app.services.experiment_calc import compute_outcome
 from app.services.experiment_guard import check_experiment, margin_from
@@ -218,7 +223,42 @@ def _validate_product_relationships(
     )
 
 
-def create_experiment(db: Session, data: ExperimentCreate) -> RescueExperiment:
+def _idempotency_fingerprint(data: ExperimentCreate) -> str:
+    canonical = json.dumps(data.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _existing_idempotent_experiment(
+    db: Session, *, retailer_id: str, key: str, request_hash: str
+) -> RescueExperiment | None:
+    record = db.scalar(select(IdempotencyRecord).where(
+        IdempotencyRecord.retailer_id == retailer_id,
+        IdempotencyRecord.idempotency_key == key,
+    ))
+    if record is None:
+        return None
+    if record.request_hash != request_hash:
+        raise IdempotencyConflict(
+            "This Idempotency-Key was already used with a different request body. "
+            "Use a new key for a new operation."
+        )
+    if record.resource_type != "experiment" or record.resource_id is None:
+        raise IdempotencyConflict("The idempotent operation exists but has no completed resource.")
+    experiment = db.get(RescueExperiment, record.resource_id)
+    if experiment is None:
+        raise IdempotencyConflict("The resource associated with this Idempotency-Key no longer exists.")
+    setattr(experiment, "_idempotent_replay", True)
+    return experiment
+
+
+def create_experiment(
+    db: Session, data: ExperimentCreate, *, idempotency_key: str | None = None
+) -> RescueExperiment:
+    """Create one experiment atomically, optionally replayable by Idempotency-Key.
+
+    The key is scoped to the retailer derived from the target product, never a
+    caller-supplied retailer ID. The key row and experiment row commit together.
+    """
     product = db.get(Product, data.product_pk)
     if product is None:
         raise NotFound(f"Product {data.product_pk} not found")
@@ -230,6 +270,20 @@ def create_experiment(db: Session, data: ExperimentCreate) -> RescueExperiment:
         bundle_product_pks=data.bundle_product_pks, qloo_evidence_ids=data.qloo_evidence_ids,
         plan=plan, title=data.title, proposed_action=data.proposed_action,
     )
+
+    request_hash = _idempotency_fingerprint(data)
+    if idempotency_key is not None and not idempotency_key.strip():
+        raise IdempotencyConflict("Idempotency-Key cannot be blank.")
+    key = idempotency_key.strip() if idempotency_key else None
+    if key:
+        if not 1 <= len(key) <= 128:
+            raise IdempotencyConflict("Idempotency-Key must contain between 1 and 128 characters.")
+        replay = _existing_idempotent_experiment(
+            db, retailer_id=product.retailer_id, key=key, request_hash=request_hash
+        )
+        if replay is not None:
+            return replay
+
     if data.plan_id is not None:
         twin = db.scalar(select(RescueExperiment).where(
             RescueExperiment.plan_id == data.plan_id,
@@ -243,19 +297,47 @@ def create_experiment(db: Session, data: ExperimentCreate) -> RescueExperiment:
                 f"Experiment {twin.id} already exists for this strategy of this plan "
                 f"(status '{twin.status}')."
             )
+
     margin = _enforce_rules(
         db, plan_id=data.plan_id, product_pk=data.product_pk, strategy_type=data.strategy_type,
         bundle_product_pks=data.bundle_product_pks, proposed_price=data.proposed_price,
         estimated_cost=data.estimated_cost,
     )
     values = data.model_dump()
-    values["calculated_margin_pct"] = margin  # a client-supplied margin is never stored
+    values["calculated_margin_pct"] = margin
     values["product_snapshot"] = _product_snapshot(db, [data.product_pk, *data.bundle_product_pks])
-    e = RescueExperiment(**values, status="proposed")
-    db.add(e)
-    db.commit()
-    db.refresh(e)
-    return e
+    experiment = RescueExperiment(**values, status="proposed")
+    db.add(experiment)
+
+    if key:
+        db.add(IdempotencyRecord(
+            retailer_id=product.retailer_id,
+            idempotency_key=key,
+            request_hash=request_hash,
+            resource_type="experiment",
+        ))
+    try:
+        db.flush()
+        if key:
+            record = db.scalar(select(IdempotencyRecord).where(
+                IdempotencyRecord.retailer_id == product.retailer_id,
+                IdempotencyRecord.idempotency_key == key,
+            ))
+            record.resource_id = experiment.id
+        commit_or_rollback(db)
+        return experiment
+    except IntegrityError:
+        db.rollback()
+        if key:
+            replay = _existing_idempotent_experiment(
+                db, retailer_id=product.retailer_id, key=key, request_hash=request_hash
+            )
+            if replay is not None:
+                return replay
+        raise DuplicateExperiment("A concurrent request already created this experiment.")
+    except Exception:
+        db.rollback()
+        raise
 
 
 def update_proposal(db: Session, exp_id: int, data: ExperimentUpdate) -> RescueExperiment:
@@ -285,8 +367,7 @@ def update_proposal(db: Session, exp_id: int, data: ExperimentUpdate) -> RescueE
     for k, v in changes.items():
         setattr(e, k, v)
     e.calculated_margin_pct = margin
-    db.commit()
-    db.refresh(e)
+    commit_or_rollback(db)
     return e
 
 
@@ -302,24 +383,21 @@ def approve(db: Session, exp_id: int, approved_by: str) -> RescueExperiment:
     _move(e, "approved")
     e.approved_by = approved_by
     e.approved_at = datetime.now(timezone.utc)
-    db.commit()
-    db.refresh(e)
+    commit_or_rollback(db)
     return e
 
 
 def reject(db: Session, exp_id: int) -> RescueExperiment:
     e = get_experiment(db, exp_id)
     _move(e, "rejected")
-    db.commit()
-    db.refresh(e)
+    commit_or_rollback(db)
     return e
 
 
 def cancel(db: Session, exp_id: int) -> RescueExperiment:
     e = get_experiment(db, exp_id)
     _move(e, "cancelled")
-    db.commit()
-    db.refresh(e)
+    commit_or_rollback(db)
     return e
 
 
@@ -336,8 +414,7 @@ def start(db: Session, exp_id: int, start_date, end_date) -> RescueExperiment:
     e.product_snapshot["capture_point"] = "experiment_start"
     _move(e, "running")
     e.start_date, e.end_date = start_date, end_date
-    db.commit()
-    db.refresh(e)
+    commit_or_rollback(db)
     return e
 
 
@@ -444,8 +521,7 @@ def record_outcome(db: Session, exp_id: int, data: OutcomeIn) -> ExperimentOutco
     )
     db.add(out)
     _move(e, "completed")
-    db.commit()
-    db.refresh(out)
+    commit_or_rollback(db)
     return out
 
 

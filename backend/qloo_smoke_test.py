@@ -1,93 +1,121 @@
-"""Sanitized live Qloo smoke test.
+"""Live Qloo smoke test through the event-supported Qloo harness CLI.
 
-Run with QLOO_API_KEY set in the environment. It makes one entity-search call
-and two small cross-category Insights calls (movie + artist). It never prints
-credentials, headers, full raw payloads, or request URLs containing secrets.
+Prerequisites (see the official event kit):
+  * Node.js 22.19.0 or newer
+  * @qloo/qloo-harness 0.1.26 or newer (`npm install --global @qloo/qloo-harness`)
+  * `qloo setup --qloo` completed with an individually attributable event key,
+    or QLOO_API_KEY supplied in the shell environment.
+
+This script intentionally does not make direct HTTP requests. It uses the
+supported `qloo api` CLI surface and prints only sanitized response metadata.
+The exact `qloo api` command set is available through `qloo api --help`.
 """
 from __future__ import annotations
 
-import os
+import json
+import re
+import shutil
+import subprocess
 import sys
 from typing import Any
 
-import httpx
-
-BASE = os.getenv("QLOO_BASE_URL", "https://hackathon.api.qloo.com").rstrip("/")
-KEY = os.environ.get("QLOO_API_KEY")
-TIMEOUT = 20.0
+MIN_VERSION = (0, 1, 26)
 
 
-def call(path: str, params: dict[str, Any]) -> tuple[int, dict[str, Any] | None]:
-    response = httpx.get(
-        BASE + path,
-        headers={"X-Api-Key": KEY or ""},
-        params=params,
-        timeout=TIMEOUT,
-    )
+def _version_tuple(value: str) -> tuple[int, int, int] | None:
+    match = re.search(r"(\d+)\.(\d+)\.(\d+)", value)
+    return tuple(map(int, match.groups())) if match else None
+
+
+def _run(args: list[str], *, timeout: int = 45) -> tuple[int, Any | None, str]:
     try:
-        payload = response.json()
-    except ValueError:
-        payload = None
-    return response.status_code, payload if isinstance(payload, dict) else None
+        result = subprocess.run(args, capture_output=True, text=True, timeout=timeout, check=False)
+    except subprocess.TimeoutExpired:
+        return 124, None, "timeout"
+    except OSError as exc:
+        return 127, None, type(exc).__name__
+    payload = None
+    if result.stdout.strip():
+        try:
+            payload = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            payload = None
+    # Never echo CLI stderr/stdout on failure: providers may include request or
+    # account metadata. Return only the process status and exception category.
+    category = "ok" if result.returncode == 0 else "cli_error"
+    return result.returncode, payload, category
 
 
-def entities(payload: dict[str, Any] | None) -> list[dict[str, Any]]:
-    if not payload:
+def _entities(payload: Any) -> list[dict[str, Any]]:
+    if not isinstance(payload, dict):
         return []
-    results = payload.get("results", [])
+    results = payload.get("results", payload.get("data", []))
     if isinstance(results, dict):
-        results = results.get("entities", [])
+        results = results.get("entities", results.get("results", []))
     return [item for item in results if isinstance(item, dict)] if isinstance(results, list) else []
 
 
 def main() -> int:
-    if not KEY:
-        print("QLOO_API_KEY is not configured; live check was not run.")
+    cli = shutil.which("qloo")
+    if not cli:
+        print("BLOCKED: qloo CLI not found. Install @qloo/qloo-harness 0.1.26+ and configure it with `qloo setup --qloo`.")
         return 2
 
-    try:
-        search_status, search_payload = call(
-            "/search", {"query": "1984", "types": "urn:entity:book", "take": 3}
-        )
-        search_items = entities(search_payload)
-        print(f"SEARCH /search: HTTP {search_status}; result_count={len(search_items)}")
-        if search_status != 200:
-            return 1
-        if not search_items:
-            print("Search succeeded but returned no book entity; Insights checks skipped.")
-            return 0
+    code, version_output, category = _run([cli, "--version"], timeout=10)
+    if code != 0 or not isinstance(version_output, (str, dict, list)):
+        # Some CLI releases write the version as plain text; capture it without
+        # emitting any other command output.
+        try:
+            version_result = subprocess.run([cli, "--version"], capture_output=True, text=True, timeout=10)
+            version_text = version_result.stdout.strip() or version_result.stderr.strip()
+        except Exception:
+            version_text = ""
+    else:
+        version_text = version_output if isinstance(version_output, str) else json.dumps(version_output)
+    parsed = _version_tuple(version_text)
+    if parsed is None or parsed < MIN_VERSION:
+        print("BLOCKED: qloo CLI version could not be verified or is older than 0.1.26.")
+        return 2
+    print(f"Qloo harness CLI: {'.'.join(map(str, parsed))} (minimum {'.'.join(map(str, MIN_VERSION) )})")
 
-        first = search_items[0]
-        entity_id = first.get("entity_id") or first.get("id")
-        if not entity_id:
-            print("Search response has no entity_id/id; response contract check failed.")
-            return 1
-        print("Search entity fields:", ", ".join(sorted(first.keys())))
-
-        for target_type in ("urn:entity:movie", "urn:entity:artist"):
-            status, payload = call("/v2/insights", {
-                "filter.type": target_type,
-                "signal.interests.entities": str(entity_id),
-                "take": 2,
-                "feature.explainability": "true",
-            })
-            items = entities(payload)
-            print(f"INSIGHTS {target_type}: HTTP {status}; result_count={len(items)}")
-            if status != 200:
-                return 1
-            if items:
-                first_result = items[0]
-                query = first_result.get("query")
-                print("Insights entity fields:", ", ".join(sorted(first_result.keys())))
-                print("Qloo affinity returned:", isinstance(query, dict) and "affinity" in query)
-        print("LIVE QLOO CHECK PASSED (HTTP responses verified; no credentials or raw payloads printed).")
+    # This invocation is documented by Qloo's official CLI workflow starter.
+    code, search_payload, category = _run([
+        cli, "api", "search", "--query", "1984", "--type", "book", "--take", "3", "--json"
+    ])
+    if code != 0:
+        print(f"BLOCKED/FAILED: qloo api search did not complete (CLI exit {code}, {category}). Check `qloo api --help` and `qloo setup --status`.")
+        return 1
+    book_entities = _entities(search_payload)
+    print(f"SEARCH: success; result_count={len(book_entities)}")
+    if not book_entities:
+        print("Search call succeeded but returned no book entities; Insights test cannot proceed.")
         return 0
-    except httpx.TimeoutException:
-        print("Live Qloo check failed: request timed out.")
+
+    entity_id = book_entities[0].get("entity_id") or book_entities[0].get("id")
+    if not isinstance(entity_id, str) or not entity_id:
+        print("FAILED: search response contained no usable entity identifier.")
         return 1
-    except httpx.HTTPError as exc:
-        print(f"Live Qloo check failed: network error ({type(exc).__name__}).")
-        return 1
+
+    # The CLI maps endpoint parameters to kebab-case flags. Inspect the local
+    # command's help when a harness release changes its generated flag schema.
+    for kind in ("movie", "artist"):
+        code, payload, category = _run([
+            cli, "api", "insights",
+            "--filter-type", f"urn:entity:{kind}",
+            "--signal-interests-entities", entity_id,
+            "--take", "2", "--feature-explainability", "true", "--json",
+        ])
+        if code != 0:
+            print(f"BLOCKED/FAILED: qloo api insights for {kind} did not complete (CLI exit {code}, {category}). Check `qloo api --help`.")
+            return 1
+        results = _entities(payload)
+        print(f"INSIGHTS {kind}: success; result_count={len(results)}")
+        if results:
+            query = results[0].get("query")
+            print(f"  affinity_field_returned={isinstance(query, dict) and 'affinity' in query}")
+
+    print("LIVE QLOO HARNESS CHECK PASSED. This verifies the supported CLI surface, not the backend's direct-HTTP transport.")
+    return 0
 
 
 if __name__ == "__main__":
