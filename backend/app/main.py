@@ -1,40 +1,23 @@
 import logging
-from contextlib import asynccontextmanager
-
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from sqlalchemy import inspect, text
-
 from app import models  # noqa: F401  (registers tables)
 from app.api import experiments, health, inventory, qloo, rescue
 from app.config import settings
-from app.db.session import Base, engine
-from app.errors import (ConstraintViolation, DuplicateExperiment, InvalidTransition,
-                        NeedsResolution, NotFound)
+from app.errors import (ConstraintViolation, DuplicateExperiment, IdempotencyConflict,
+                        InvalidTransition, NeedsResolution, NotFound)
 from app.services.experiment_calc import CalcError
 from app.services.qloo_service import QlooError
 
 log = logging.getLogger("stockrescue")
 
 
-@asynccontextmanager
-async def lifespan(_: FastAPI):
-    # Hackathon shortcut. Replace with Alembic migrations before production use.
-    Base.metadata.create_all(bind=engine)
-    # Compatibility patch for installations created before the experiment
-    # accounting snapshot field was introduced. New databases get it from
-    # metadata; old SQLite/PostgreSQL databases are upgraded without data loss.
-    inspector = inspect(engine)
-    if "rescue_experiments" in inspector.get_table_names():
-        columns = {column["name"] for column in inspector.get_columns("rescue_experiments")}
-        if "product_snapshot" not in columns:
-            with engine.begin() as connection:
-                connection.execute(text("ALTER TABLE rescue_experiments ADD COLUMN product_snapshot JSON"))
-    yield
+# Database schema is managed exclusively through Alembic. Run
+# `alembic upgrade head` before starting the application; startup must never
+# mutate production schema implicitly.
 
-
-app = FastAPI(title="StockRescue API", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="StockRescue API", version="0.1.0")
 
 app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origin_list,
                    allow_methods=["*"], allow_headers=["*"],
@@ -71,6 +54,11 @@ async def _cv(_: Request, e: ConstraintViolation):
 @app.exception_handler(DuplicateExperiment)
 async def _dup(_: Request, e: DuplicateExperiment):
     return _err(409, "duplicate_experiment", str(e))
+
+
+@app.exception_handler(IdempotencyConflict)
+async def _idempotency_conflict(_: Request, e: IdempotencyConflict):
+    return _err(409, "idempotency_conflict", str(e))
 
 
 @app.exception_handler(NeedsResolution)
