@@ -33,7 +33,7 @@ def test_fresh_database_migrates_to_head_without_schema_drift(tmp_path):
         assert expected.issubset(tables)
         with engine.connect() as connection:
             revision = connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-        assert revision == "20261030_settings_sales"
+        assert revision == "b52f3103668d"
     finally:
         engine.dispose()
 
@@ -90,7 +90,7 @@ def test_legacy_create_all_database_is_adopted_without_data_loss(tmp_path):
             revision = connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
             columns = {row["name"] for row in inspect(connection).get_columns("rescue_experiments")}
         assert sku == "LEGACY-1"
-        assert revision == "20261030_settings_sales"
+        assert revision == "b52f3103668d"
         assert "product_snapshot" in columns
         assert "idempotency_records" in inspect(engine).get_table_names()
     finally:
