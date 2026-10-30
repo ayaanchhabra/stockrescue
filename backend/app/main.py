@@ -26,10 +26,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title="StockRescue API", version="0.1.0", lifespan=lifespan)
 
-app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origin_list,
-                   allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-                   allow_headers=["Authorization", "Content-Type", "X-Request-ID", "Idempotency-Key"],
-                   expose_headers=["X-Rescue-Plan-Id"])
+
 
 QLOO_HTTP = {"not_configured": 503, "auth": 502, "timeout": 504, "rate_limited": 429,
              "upstream": 502, "bad_response": 502}
@@ -135,3 +132,8 @@ app.include_router(experiments.router)
 app.include_router(inventory.router)
 app.include_router(retailer_settings.router)
 app.include_router(rescue.router)
+
+app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origin_list,
+                   allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+                   allow_headers=["Authorization", "Content-Type", "X-Request-ID", "Idempotency-Key"],
+                   expose_headers=["X-Rescue-Plan-Id"])
