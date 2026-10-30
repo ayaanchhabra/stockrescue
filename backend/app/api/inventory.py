@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.db.session import get_db
 from app.tenant import retailer_id_for
-from app.models.entities import Product
+from app.models.entities import InventorySalesSnapshot, Product
 from app.services.inventory_csv import (
     MAX_UPLOAD_BYTES,
     InventoryCSVRow,
@@ -25,6 +25,7 @@ from app.services.inventory_import import (
     import_inventory_csv,
 )
 from app.services.inventory_metrics import build_inventory_dashboard
+from app.services.retailer_settings_service import load_decision_settings
 
 router = APIRouter(prefix="/inventory", tags=["inventory"])
 
@@ -160,6 +161,37 @@ def import_inventory(
     }
 
 
+@router.get("/products/{product_pk}/sales-history")
+def product_sales_history(product_pk: int, db: Session = Depends(get_db)):
+    """Return dated imported sales snapshots for a retailer-owned product."""
+    retailer_id = retailer_id_for(db)
+    product = db.scalar(select(Product).where(
+        Product.id == product_pk, Product.retailer_id == retailer_id
+    ))
+    if product is None:
+        return JSONResponse(status_code=404, content={
+            "error": "not_found", "message": f"Product {product_pk} not found"
+        })
+    rows = db.scalars(
+        select(InventorySalesSnapshot)
+        .where(InventorySalesSnapshot.product_pk == product_pk,
+               InventorySalesSnapshot.retailer_id == retailer_id)
+        .order_by(InventorySalesSnapshot.imported_at.desc(), InventorySalesSnapshot.id.desc())
+    ).all()
+    return {
+        "product_pk": product.id, "sku": product.sku,
+        "snapshots": [
+            {
+                "id": row.id, "imported_at": row.imported_at.isoformat(),
+                "source": row.source, "units_sold_30d": row.units_sold_30d,
+                "units_sold_60d": row.units_sold_60d,
+                "units_sold_90d": row.units_sold_90d,
+                "days_in_stock": row.days_in_stock,
+            } for row in rows
+        ],
+    }
+
+
 @router.get("/dashboard")
 def inventory_dashboard(db: Session = Depends(get_db)):
     """Return slow-moving metrics for the MVP retailer's current inventory."""
@@ -169,7 +201,8 @@ def inventory_dashboard(db: Session = Depends(get_db)):
         .order_by(Product.id)
     )
     products = db.scalars(statement).all()
-    dashboard = build_inventory_dashboard(products)
+    decision_settings = load_decision_settings(db)
+    dashboard = build_inventory_dashboard(products, decision_settings.slow_moving)
 
     # Convert dataclasses and tuples into JSON-compatible structures.
     return jsonable_encoder(dashboard)

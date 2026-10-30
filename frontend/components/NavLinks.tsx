@@ -7,6 +7,8 @@ const links = [
   { href: "/", label: "Dashboard" },
   { href: "/upload", label: "Upload" },
   { href: "/experiments", label: "Experiments" },
+  { href: "/settings", label: "Settings" },
+  { href: "/access", label: "API access" },
 ];
 
 export default function NavLinks() {

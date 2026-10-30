@@ -14,7 +14,7 @@ export default function CreateExperimentButton({
   const [message, setMessage] = useState("");
 
   if (planId === null) {
-    return <p className="text-xs text-gray-500">Plan wasn't saved, so an experiment can't be created from it.</p>;
+    return <p className="text-xs text-gray-500">Plan wasn&apos;t saved, so an experiment can&apos;t be created from it.</p>;
   }
 
   async function onClick() {

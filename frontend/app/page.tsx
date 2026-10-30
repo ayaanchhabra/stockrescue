@@ -18,6 +18,8 @@ type Flagged = {
 
 type Dashboard = {
   total_products: number;
+  total_inventory_units: number;
+  potential_retail_value: number;
   needs_attention_count: number;
   not_enough_data_count: number;
   total_inventory_cost_tied_up: number;
@@ -56,9 +58,9 @@ function CountUp({ value, prefix = "" }: { value: number; prefix?: string }) {
   const [n, setN] = useState(0);
   useEffect(() => {
     if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
-      setN(value);
-      return;
-    }
+  const frame = requestAnimationFrame(() => setN(value));
+  return () => cancelAnimationFrame(frame);
+  }
     let raf = 0;
     const t0 = performance.now();
     const tick = (t: number) => {
@@ -75,9 +77,9 @@ function CountUp({ value, prefix = "" }: { value: number; prefix?: string }) {
 function Ring({ pct }: { pct: number }) {
   const [on, setOn] = useState(false);
   useEffect(() => {
-    const t = setTimeout(() => setOn(true), 200);
-    return () => clearTimeout(t);
-  }, []);
+  const frame = requestAnimationFrame(() => setOn(true));
+  return () => cancelAnimationFrame(frame);
+}, []);
   const r = 54;
   const c = 2 * Math.PI * r;
   return (
@@ -268,6 +270,24 @@ export default function Home() {
         )}
       </section>
 
+      <section className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        <div className="panel p-5">
+          <div className="text-xs uppercase tracking-widest text-neutral-500">Units in stock</div>
+          <div className="num mt-3 font-display text-3xl">{data.total_inventory_units.toLocaleString("en-IN")}</div>
+          <p className="mt-1 text-xs text-neutral-500">Current on-hand inventory across all products.</p>
+        </div>
+        <div className="panel p-5">
+          <div className="text-xs uppercase tracking-widest text-neutral-500">Potential retail value</div>
+          <div className="num mt-3 font-display text-3xl">{inr(data.potential_retail_value)}</div>
+          <p className="mt-1 text-xs text-neutral-500">Full-price value of current stock; not a sales forecast.</p>
+        </div>
+        <div className="panel p-5">
+          <div className="text-xs uppercase tracking-widest text-neutral-500">Inventory cost</div>
+          <div className="num mt-3 font-display text-3xl">{inr(data.total_inventory_cost_tied_up)}</div>
+          <p className="mt-1 text-xs text-neutral-500">Quantity multiplied by recorded unit cost.</p>
+        </div>
+      </section>
+
       <details className="mt-4 text-sm text-neutral-500">
         <summary className="cursor-pointer select-none hover:text-neutral-300">How these numbers are calculated</summary>
         <p className="mt-2 max-w-3xl leading-relaxed">
@@ -313,7 +333,7 @@ export default function Home() {
           </div>
         ) : (
           <ul className="mt-8 space-y-3">
-            {visible.map((p, i) => {
+            {visible.map((p) => {
               const rank = products.indexOf(p) + 1;
               const isTop = rank === 1;
               return (

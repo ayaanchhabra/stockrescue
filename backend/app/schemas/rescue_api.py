@@ -26,9 +26,9 @@ class ConstraintsIn(_In):
     max_campaign_budget: Optional[float] = None
     restricted_product_ids: list[str] = Field(default_factory=list)
 
-    def to_constraints(self) -> Constraints:
-        """Merge over the defaults. Raises ValueError for out-of-range values."""
-        d = DEFAULT_CONSTRAINTS
+    def to_constraints(self, defaults: Constraints | None = None) -> Constraints:
+        """Merge request overrides over the authenticated retailer's settings."""
+        d = defaults or DEFAULT_CONSTRAINTS
         return Constraints(
             min_margin_pct=d.min_margin_pct if self.min_margin_pct is None else self.min_margin_pct,
             max_discount_pct=d.max_discount_pct if self.max_discount_pct is None else self.max_discount_pct,
@@ -39,8 +39,11 @@ class ConstraintsIn(_In):
         )
 
 
-def constraints_from(body: Optional[ConstraintsIn]) -> Constraints:
-    return body.to_constraints() if body is not None else DEFAULT_CONSTRAINTS
+def constraints_from(
+    body: Optional[ConstraintsIn], defaults: Constraints | None = None
+) -> Constraints:
+    base = defaults or DEFAULT_CONSTRAINTS
+    return body.to_constraints(base) if body is not None else base
 
 
 class RescueRunIn(_In):
@@ -63,7 +66,7 @@ class EvaluateIn(_In):
     )
     proposed_price: float = Field(..., gt=0, description="Price for ONE unit of the strategy.")
     estimated_experiment_cost: float = Field(0, ge=0)
-    planned_units: int = Field(DEFAULT_STRATEGY_SETTINGS.test_units, ge=1)
+    planned_units: Optional[int] = Field(default=None, ge=1)
     constraints: Optional[ConstraintsIn] = None
 
 

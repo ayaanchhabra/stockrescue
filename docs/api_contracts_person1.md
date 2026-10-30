@@ -112,3 +112,26 @@ When `is_simulated` is true, the first limitation starts with "SIMULATED".
 Start command (from `backend/`): `uvicorn app.main:app --host 0.0.0.0 --port $PORT`.
 
 Apply schema changes before starting the application: `alembic upgrade head` (from `backend/`). Use `/health` for process liveness and `/ready` for database/schema/migration readiness. Production startup does not mutate the schema; schema evolution is managed by Alembic. Use `alembic current` to inspect the installed revision and `alembic check` to detect model/schema drift.
+## Person 2 urgent MVP additions — 30 October 2026
+
+### Retailer settings
+
+- `GET /settings` — authenticated; returns the retailer's persisted decision settings or documented MVP defaults.
+- `PUT /settings` — authenticated full-document replacement; validates `currency=INR`, constraints, strategy defaults, ranking weights and slow-moving thresholds. A successful response returns the normalized saved document.
+- New experiments store the validated settings document in `settings_snapshot`. Edit, approve and start rechecks use the saved experiment snapshot. Older saved plans with only a legacy constraints snapshot preserve those hard constraints.
+
+### Inventory aggregates and sales snapshots
+
+`GET /inventory/dashboard` also returns:
+- `total_inventory_units`: sum of current on-hand quantity across retailer products.
+- `potential_retail_value`: sum of quantity multiplied by current selling price; theoretical full-price value, not a sales forecast.
+
+Each valid row imported by `POST /inventory/import` adds a dated `inventory_sales_snapshots` row. Missing sales values remain `null`.
+
+- `GET /inventory/products/{product_pk}/sales-history` — authenticated and retailer-scoped; returns dated imported 30/60/90-day sales windows, source and days-in-stock values.
+
+### Browser access flow
+
+The frontend `/access` page accepts a retailer bearer token issued out-of-band and validates it via `GET /settings`. The current demo client stores that token in tab-scoped `sessionStorage` and attaches it to API requests. This is not a production OAuth/session design; use a short-lived server-side session before production deployment.
+
+The CORS allow-method list includes `PUT` for the settings endpoint. Exact deployed frontend origin(s) must still be configured in `CORS_ORIGINS`.

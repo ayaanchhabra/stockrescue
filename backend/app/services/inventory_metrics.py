@@ -71,6 +71,8 @@ class ProductAssessment:
 @dataclass(frozen=True)
 class InventoryDashboard:
     total_products: int
+    total_inventory_units: int
+    potential_retail_value: float
     needs_attention_count: int
     not_enough_data_count: int
     total_inventory_cost_tied_up: float
@@ -256,6 +258,13 @@ def build_inventory_dashboard(
             "Count of products in the current inventory snapshot when "
             "the dashboard is requested."
         ),
+        "total_inventory_units": (
+            "Sum of quantity_in_stock across all products in the current inventory snapshot."
+        ),
+        "potential_retail_value": (
+            "Sum of quantity_in_stock multiplied by current selling_price across all products; "
+            "this is a theoretical full-price value, not forecast revenue."
+        ),
         "needs_attention_count": (
             "Count of products with at least one slow-moving rule triggered, "
             "using the currently stored units_sold_30d and days_in_stock values. "
@@ -278,6 +287,10 @@ def build_inventory_dashboard(
 
     return InventoryDashboard(
         total_products=len(assessments),
+        total_inventory_units=sum(int(product.quantity_in_stock) for product in products),
+        potential_retail_value=_money(
+            sum(float(product.quantity_in_stock) * float(product.selling_price) for product in products)
+        ),
         needs_attention_count=len(flagged),
         not_enough_data_count=len(insufficient),
         total_inventory_cost_tied_up=_money(

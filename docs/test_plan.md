@@ -322,3 +322,17 @@ Pending integration from Person 2's `fix/margin-floor-and-stock-rule` branch:
 Warning on the most recent full-suite run: One Starlette deprecation warning involving `httpx` and `starlette.testclient`. It did not cause test failure.
 
 End-to-end status: These are automated backend test results. They do not establish that manual scenarios T01–T10 have all passed end-to-end.
+
+## Additional Person 2 regression checks — 30 October 2026
+
+- **P2-R01 — Settings persistence:** `GET /settings` returns documented defaults; `PUT /settings` persists validated settings for the authenticated retailer only.
+- **P2-R02 — Strict settings:** reject invalid ranking weights, unsupported fields, invalid INR currency and out-of-range settings.
+- **P2-R03 — Direct experiment snapshot:** direct experiment creation uses saved retailer constraints and stores a full settings snapshot.
+- **P2-R04 — Snapshot stability:** changing retailer settings after an experiment is proposed does not silently change the saved hard constraints used when the experiment is approved.
+- **P2-R05 — Dashboard thresholds:** dashboard classifications use persisted slow-moving settings.
+- **P2-R06 — Inventory aggregates:** total units and potential retail value match a hand-calculated inventory fixture.
+- **P2-R07 — Sales snapshot history:** successful CSV imports create dated rows; missing 30/60/90-day values remain `null`.
+- **P2-R08 — Settings CORS:** browser preflight for `PUT /settings` is accepted for a configured frontend origin.
+- **P2-R09 — Browser token:** the frontend's API access screen validates a bearer token through a protected API route; never place a retailer token in a public frontend environment variable.
+
+These regression tests do not replace live Qloo, PostgreSQL, frontend browser build, T01–T10 manual workflow, or hosted deployment verification.

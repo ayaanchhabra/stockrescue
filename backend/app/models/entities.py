@@ -48,6 +48,33 @@ class Product(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
+class RetailerSettings(Base):
+    """Persisted decision-engine configuration for one authenticated retailer."""
+    __tablename__ = "retailer_settings"
+    __table_args__ = (UniqueConstraint("retailer_id", name="uq_retailer_settings_retailer"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    retailer_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    settings_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class InventorySalesSnapshot(Base):
+    """One dated 30/60/90-day sales snapshot per product import."""
+    __tablename__ = "inventory_sales_snapshots"
+    __table_args__ = (Index("ix_sales_snapshot_retailer_product_time", "retailer_id", "product_pk", "imported_at"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    retailer_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    product_pk: Mapped[int] = mapped_column(ForeignKey("products.id", ondelete="CASCADE"), nullable=False, index=True)
+    imported_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    source: Mapped[str] = mapped_column(String(40), default="inventory_csv", nullable=False)
+    units_sold_30d: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    units_sold_60d: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    units_sold_90d: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    days_in_stock: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
 class QlooEvidence(Base):
     """Raw Qloo response, stored verbatim so the UI can show real provenance."""
     __tablename__ = "qloo_evidence"
@@ -109,6 +136,8 @@ class RescueExperiment(Base):
     bundle_product_pks: Mapped[list[Any]] = mapped_column(JSON, default=list)
     # Target + partner SKU/cost/stock snapshot (refreshed when the experiment starts).
     product_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    # Exact retailer decision configuration used when this experiment was created.
+    settings_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     proposed_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     estimated_cost: Mapped[float] = mapped_column(Float, default=0.0)
     calculated_margin_pct: Mapped[float | None] = mapped_column(Float, nullable=True)

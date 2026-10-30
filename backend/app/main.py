@@ -4,12 +4,10 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from sqlalchemy import inspect, text
 
 from app import models  # noqa: F401  (registers tables)
-from app.api import experiments, health, inventory, qloo, rescue
+from app.api import experiments, health, inventory, qloo, rescue, settings as retailer_settings
 from app.config import settings
-from app.db.session import Base, engine
 from app.errors import (ConstraintViolation, DuplicateExperiment, InvalidTransition,
                         NeedsResolution, NotFound, StockCommitmentConflict)
 from app.security import SecurityConfigurationError, authenticate_bearer, rate_limiter
@@ -21,29 +19,15 @@ log = logging.getLogger("stockrescue")
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    # Hackathon shortcut. Replace with Alembic migrations before production use.
-    Base.metadata.create_all(bind=engine)
-    # Compatibility patch for installations created before the experiment
-    # accounting snapshot field was introduced. New databases get it from
-    # metadata; old SQLite/PostgreSQL databases are upgraded without data loss.
-    inspector = inspect(engine)
-    if "products" in inspector.get_table_names():
-        product_columns = {column["name"] for column in inspector.get_columns("products")}
-        if "isbn13" not in product_columns:
-            with engine.begin() as connection:
-                connection.execute(text("ALTER TABLE products ADD COLUMN isbn13 VARCHAR(13)"))
-    if "rescue_experiments" in inspector.get_table_names():
-        columns = {column["name"] for column in inspector.get_columns("rescue_experiments")}
-        if "product_snapshot" not in columns:
-            with engine.begin() as connection:
-                connection.execute(text("ALTER TABLE rescue_experiments ADD COLUMN product_snapshot JSON"))
+    # Schema creation/upgrades are deployment operations: run `alembic upgrade head`
+    # before starting the API. Production startup must never mutate schemas implicitly.
     yield
 
 
 app = FastAPI(title="StockRescue API", version="0.1.0", lifespan=lifespan)
 
 app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origin_list,
-                   allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+                   allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
                    allow_headers=["Authorization", "Content-Type", "X-Request-ID", "Idempotency-Key"],
                    expose_headers=["X-Rescue-Plan-Id"])
 
@@ -149,4 +133,5 @@ app.include_router(health.router)
 app.include_router(qloo.router)
 app.include_router(experiments.router)
 app.include_router(inventory.router)
+app.include_router(retailer_settings.router)
 app.include_router(rescue.router)

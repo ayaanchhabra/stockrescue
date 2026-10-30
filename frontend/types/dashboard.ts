@@ -14,6 +14,8 @@ export type FlaggedProduct = {
 
 export type Dashboard = {
   total_products: number;
+  total_inventory_units: number;
+  potential_retail_value: number;
   needs_attention_count: number;
   not_enough_data_count: number;
   total_inventory_cost_tied_up: number;

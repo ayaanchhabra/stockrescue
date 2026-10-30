@@ -28,12 +28,12 @@ def test_fresh_database_migrates_to_head_without_schema_drift(tmp_path):
         expected = {
             "products", "qloo_evidence", "qloo_entity_mappings", "rescue_plans",
             "rescue_experiments", "experiment_outcomes", "idempotency_records",
-            "alembic_version",
+            "retailer_settings", "inventory_sales_snapshots", "alembic_version",
         }
         assert expected.issubset(tables)
         with engine.connect() as connection:
             revision = connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-        assert revision == "27c4190e336d"
+        assert revision == "20261030_settings_sales"
     finally:
         engine.dispose()
 
@@ -67,7 +67,10 @@ def test_legacy_create_all_database_is_adopted_without_data_loss(tmp_path):
             # had not yet been introduced, and where no Alembic version table
             # or idempotency table exists.
             connection.execute(text("DROP TABLE idempotency_records"))
+            connection.execute(text("DROP TABLE inventory_sales_snapshots"))
+            connection.execute(text("DROP TABLE retailer_settings"))
             connection.execute(text("ALTER TABLE rescue_experiments DROP COLUMN product_snapshot"))
+            connection.execute(text("ALTER TABLE rescue_experiments DROP COLUMN settings_snapshot"))
     finally:
         legacy_engine.dispose()
 
@@ -87,7 +90,7 @@ def test_legacy_create_all_database_is_adopted_without_data_loss(tmp_path):
             revision = connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
             columns = {row["name"] for row in inspect(connection).get_columns("rescue_experiments")}
         assert sku == "LEGACY-1"
-        assert revision == "27c4190e336d"
+        assert revision == "20261030_settings_sales"
         assert "product_snapshot" in columns
         assert "idempotency_records" in inspect(engine).get_table_names()
     finally:
